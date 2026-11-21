@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.0
+
+- Worlds with any name: the main world follows `level-name` from `server.properties` (Java
+  properties escapes, spaces, paths like `worlds/survival`), with its `<level-name>_nether`,
+  `<level-name>_the_end` and Paper datapack dimension folders wherever it is.
+- Bukkit's world container (`settings.world-container` in `bukkit.yml`) is searched too, and other
+  worlds (Multiverse and similar) are found up to two folders deep instead of only at the root.
+- World folders the map misses can be added per server from the World Overview (gear button,
+  new `world-map.manage-worlds` permission); paths must stay inside the server's files.
+- Datapack and mod dimensions with nested paths (`namespace:caves/deep`) are shown under their
+  id; dimensions whose datapack type has a ceiling are drawn below the roof like the Nether.
+- Spawn, version and the "Go to spawn" button follow the selected world; switching worlds jumps to
+  that world's spawn.
+- Teleporting to a map position lands in the selected world: Paper/Spigot worlds use their
+  `minecraft:<world>` key, and worlds the server does not load cannot be teleported into.
+- Players in Paper worlds without a `uid.dat` are placed by their dimension key.
+- The World select always shows, the main world labelled "(main)"; clearer messages when no world
+  was generated yet and when `level-name` points to a folder that does not exist.
+
 ## 0.1.0
 
 - First version: a World Map page for Minecraft Java servers, drawn from the server files with no

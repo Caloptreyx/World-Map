@@ -11,8 +11,9 @@ Package name: `dev.caloptreyx.worldmap` · Requires panel `>=1.2.10`
 - **2D map** of every world and dimension, block colours tinted by biome (grass, foliage, water)
   and shaded by slope, like a vanilla map item. Pan by dragging, zoom with the wheel, a pinch or a
   double-click, fullscreen. The map fills the screen below the page header.
-- **World Overview** panel: dimension switch, world select, spawn coordinates, the version that
-  last saved the world, the number of region files, jump to coordinates.
+- **World Overview** panel: world select (every world found, the main one marked "(main)"),
+  dimension switch, spawn coordinates and the version that last saved the selected world, the
+  number of region files, jump to coordinates, and the world folder settings (gear button).
 - **Player Selection** panel: every player who has joined (skin head, name, online badge), their
   last saved position, locate on the map, and for operators teleport to another player or to a
   spot picked on the map. Player markers show their name on hover or selection.
@@ -35,21 +36,21 @@ Package name: `dev.caloptreyx.worldmap` · Requires panel `>=1.2.10`
 No plugin or mod is needed. The backend reads the world through the panel's file access (Wings),
 exactly like the file manager:
 
-- `server.properties` (`level-name`), every root folder with a `level.dat`, and the dimension
-  folders: `region/`, `DIM-1/`, `DIM1/` (vanilla before 26.1), `world_nether/DIM-1` and
-  `world_the_end/DIM1` (Paper/Spigot before 26.1, shown as dimensions of the main world),
-  `dimensions/<namespace>/<name>/` (26.1+ and datapack dimensions). Other worlds with a
-  `level.dat` (Multiverse and similar) are listed as their own worlds.
+- **Worlds**: `server.properties`, `bukkit.yml` and the folders with a `level.dat`; see
+  [Worlds and dimensions](#worlds-and-dimensions).
 - **Terrain**: each region file (`r.<x>.<z>.mca`, 32 × 32 chunks) is read once and rendered on the
   panel into a 512 × 512 PNG (one pixel per block). The tile is stored in the panel database and
   served again until the region file's size or modification time changes, so unchanged regions
   are never downloaded twice. Only regions on screen are rendered, at most a few at a time
   panel-wide (setting), one region file in memory per render. When more than 64 regions are on
   screen, only cached ones are shown until you zoom in.
-- The **Nether** is drawn from a configurable height (default 100) down, below its bedrock roof.
+- The **Nether** (and datapack dimensions with a ceiling) is drawn from a configurable height
+  (default 100) down, below its bedrock roof.
 - **Players**: `playerdata/<uuid>.dat` (`players/data/` since 26.1) for the last saved position,
-  `usercache.json` for names, Bukkit's `WorldUUID` with each world's `uid.dat` to place players in
-  Paper/Spigot worlds. Skin heads come from mc-heads.net.
+  `usercache.json` for names, the main world's player folder for everyone. Players are placed by
+  Bukkit's `WorldUUID` with each world's `uid.dat`, else by their `Dimension` (Paper and Spigot
+  name other worlds `minecraft:<world>`), and only drawn on the world and dimension they are in.
+  Skin heads come from mc-heads.net.
 - **Mobs and entities**: `entities/r.<x>.<z>.mca` (1.17+) for the regions on screen, once zoomed
   in to at most 3 × 3 regions. Icons come from mc.nerothe.com.
 - **Heatmap**: a background task samples every server whose map has been opened. While a server
@@ -69,6 +70,53 @@ colormaps as the client computes them. Only the derived colours are committed, n
 Blocks of other namespaces borrow the colour of the vanilla block their name ends with
 (`mymod:redwood_planks` as planks), else gray. Regenerate with
 `python3 scripts/gen_colors.py [version]`.
+
+## Worlds and dimensions
+
+Where the map looks, every 30 seconds at most per server (a few dozen folder listings, a few at a
+time):
+
+1. **The main world** is `level-name` from `server.properties`, read the way Java reads properties
+   files (`=`, `:` or a space between key and value, `\:`, `\uXXXX` and other escapes, continued
+   lines, the last of repeated keys). It may contain spaces and folders (`worlds/survival`); a
+   missing file or key means `world`. With Bukkit's world container set, the main world is
+   looked for in it first.
+2. **Its other dimensions**: `DIM-1` and `DIM1` inside it (vanilla before 26.1),
+   `<level-name>_nether`, `<level-name>_the_end` and `<level-name>_<path>` beside it (Paper and
+   Spigot keep each dimension in its own world folder), and
+   `dimensions/<namespace>/<path>/region` (26.1+, datapack and mod dimensions, the path up to three
+   folders deep). When the same dimension exists twice (a server switched between Paper and
+   vanilla), the copy whose `level.dat` was saved last wins.
+3. **Bukkit's world container**: `settings.world-container` in `bukkit.yml`.
+4. **Other worlds**: every folder with a `level.dat` up to two folders below the server root and
+   the world container (Multiverse and similar). The map does not look into folders that cannot
+   hold worlds (`plugins`, `logs`, `cache`, `libraries`, `versions`, `config`, `mods`,
+   `backups`, `crash-reports`, map plugins' folders...) nor inside worlds, lists at most 64
+   folders while looking and shows at most 32 found worlds.
+5. **Folders added by hand**: the gear button in the World Overview (permission
+   `world-map.manage-worlds`) takes up to 16 folders relative to the server root, for layouts
+   the search misses (deeper folders, a `--world-container` set on the command line, a world in
+   `backups/`). Absolute paths and `..` are refused; the panel's file access keeps every path
+   inside the server's files anyway. Each folder shows whether a world was found in it.
+
+Datapack and mod dimensions are labelled by their id (`namespace:path`). They are drawn like the
+Overworld unless a datapack folder in the world's `datapacks/` says their dimension type has a
+ceiling (`has_ceiling`, or the `minecraft:the_nether` / `minecraft:overworld_caves` types); zipped
+datapacks and mods are not read, so their dimensions are drawn like the Overworld.
+
+**Teleports** go through `execute in <dimension> run tp ...`. The main world's dimensions use their
+own ids; on Paper and Spigot every other world in the container is loaded as
+`minecraft:<world name in lowercase>`. Worlds the server does not load (other worlds on a vanilla
+or modded server, worlds outside the container, names that are not valid keys) cannot be
+teleported into: the map hides the action there.
+
+**Everything else follows the selected world**: tiles and their cache (keyed by the region file),
+entities, the heatmap (samples are kept per world folder and dimension, as in 0.1.0), chunk
+deletion (only that world's region files), the spawn marker and "Go to spawn".
+
+When there is nothing to draw the page says why: no world generated yet, or `level-name` points to
+a folder that does not exist. When the main world is missing but other worlds exist, they are
+shown with a note.
 
 ## Supported versions
 
@@ -92,12 +140,13 @@ The page and every endpoint check the acting user's server permissions through t
 | Delete chunks | `world-map.view`, `files.read-content`, `world-map.delete-chunks`, `files.update`; server stopped |
 | Teleport | `world-map.view`, `world-map.teleport`, `control.console`; server running |
 | Reset the heatmap | `world-map.view`, `world-map.reset-heatmap` |
+| Add world folders | `world-map.view`, `files.read-content`, `world-map.manage-worlds` |
 
 Server owners and admins have all of them; give the `world-map.*` permissions to subusers like any
 other permission. The console fallback for online players also needs `control.read-console`.
 Every write is logged: `server:file.write` per rewritten region file,
 `server:worldmap.delete-chunks`, `server:console.command` for teleports and `list`,
-`server:worldmap.reset-heatmap`.
+`server:worldmap.reset-heatmap`, `server:worldmap.update-worlds`.
 
 ## Admin settings
 
@@ -132,7 +181,7 @@ rewritten file, but **make a backup first**.
 - The heatmap starts collecting the first time a server's map is opened, and only while the
   server runs.
 - Teleporting to a map position puts the player on the topmost block there (or the floor under
-  the Nether ceiling); the chunk must have been generated.
+  the Nether ceiling); the chunk must have been generated, and the server must load the world.
 - Very large worlds: tiles render on first view (about a second per region); zoomed far out only
   already-rendered regions are shown.
 
@@ -140,7 +189,8 @@ rewritten file, but **make a backup first**.
 
 Below `/api/client/servers/{server}/world-map`: `GET /` (worlds, spawn, capabilities),
 `GET /regions`, `GET /tile` (PNG), `GET /players`, `GET /online`, `GET /entities`,
-`GET|DELETE /heatmap`, `POST /chunks/delete`, `POST /teleport`. Admin:
+`GET|DELETE /heatmap`, `POST /chunks/delete`, `POST /teleport`, `PUT /worlds` (folders added by
+hand). Admin:
 `GET|PUT /api/admin/extensions/dev.caloptreyx.worldmap/settings`.
 
 ## Development

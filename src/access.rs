@@ -10,6 +10,7 @@ pub const VIEW: &str = "world-map.view";
 pub const DELETE_CHUNKS: &str = "world-map.delete-chunks";
 pub const TELEPORT: &str = "world-map.teleport";
 pub const RESET_HEATMAP: &str = "world-map.reset-heatmap";
+pub const MANAGE_WORLDS: &str = "world-map.manage-worlds";
 
 const READ_FILES: &str = "files.read-content";
 const WRITE_FILES: &str = "files.update";
@@ -55,6 +56,8 @@ pub enum Action {
     Teleport,
     /// Clearing the server's heatmap samples.
     ResetHeatmap,
+    /// Adding world folders the map does not find by itself.
+    ManageWorlds,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -73,6 +76,7 @@ impl Action {
             Self::DeleteChunks => &[VIEW, READ_FILES, DELETE_CHUNKS, WRITE_FILES],
             Self::Teleport => &[VIEW, TELEPORT, CONSOLE],
             Self::ResetHeatmap => &[VIEW, RESET_HEATMAP],
+            Self::ManageWorlds => &[VIEW, READ_FILES, MANAGE_WORLDS],
         }
     }
 
@@ -115,6 +119,7 @@ pub struct Capabilities {
     pub delete_chunks: bool,
     pub teleport: bool,
     pub reset_heatmap: bool,
+    pub manage_worlds: bool,
 }
 
 pub fn capabilities(grants: &impl Grants) -> Capabilities {
@@ -122,6 +127,7 @@ pub fn capabilities(grants: &impl Grants) -> Capabilities {
         delete_chunks: Action::DeleteChunks.granted(grants),
         teleport: Action::Teleport.granted(grants),
         reset_heatmap: Action::ResetHeatmap.granted(grants),
+        manage_worlds: Action::ManageWorlds.granted(grants),
     }
 }
 
@@ -171,6 +177,7 @@ mod tests {
         DELETE_CHUNKS,
         TELEPORT,
         RESET_HEATMAP,
+        MANAGE_WORLDS,
         READ_FILES,
         WRITE_FILES,
         CONSOLE,
@@ -232,6 +239,14 @@ mod tests {
             Err(Denied::Permission(READ_FILES))
         );
         assert_eq!(Action::View.check(&set(&[VIEW, READ_FILES]), None), Ok(()));
+        assert_eq!(
+            Action::ManageWorlds.check(&set(&[VIEW, MANAGE_WORLDS]), None),
+            Err(Denied::Permission(READ_FILES))
+        );
+        assert_eq!(
+            Action::ManageWorlds.check(&set(&[VIEW, READ_FILES]), None),
+            Err(Denied::Permission(MANAGE_WORLDS))
+        );
         let viewer = set(&[VIEW, READ_FILES, CONSOLE]);
         assert_eq!(
             capabilities(&viewer),
@@ -239,6 +254,7 @@ mod tests {
                 delete_chunks: false,
                 teleport: false,
                 reset_heatmap: false,
+                manage_worlds: false,
             }
         );
         assert!(!may_list_by_console(&viewer));
@@ -249,6 +265,7 @@ mod tests {
                 delete_chunks: true,
                 teleport: true,
                 reset_heatmap: true,
+                manage_worlds: true,
             }
         );
         assert!(may_list_by_console(&everything));

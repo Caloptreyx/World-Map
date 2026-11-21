@@ -10,7 +10,9 @@ const translations = defineTranslations({
       egg: 'The administrator has not enabled the world map for this kind of server.',
       bedrock: 'This is a Bedrock server. The world map reads Minecraft Java worlds.',
       notMinecraft: 'This does not look like a Minecraft Java server: there is no server.properties.',
-      noWorld: 'No world was found yet. Start the server once so it generates its world.',
+      noWorld: "No world found: the server hasn't generated one yet. Start it once so it creates its world.",
+      levelMissing:
+        "level-name in server.properties points to “{name}”, which doesn't exist. Correct level-name, or start the server so it creates that world.",
       tooOld:
         'This world was last saved by a Minecraft version older than 1.13, which the map cannot draw. Open it with a newer version first.',
     },
@@ -26,6 +28,23 @@ const translations = defineTranslations({
       jumpButton: 'Jump',
       world: 'World',
       dimension: 'Dimension',
+      mainWorld: '{name} (main)',
+      levelMissing: "level-name points to “{name}”, which doesn't exist. Showing the other worlds.",
+      levelEmpty: 'The main world “{name}” has no saved terrain yet. Showing the other worlds.',
+      folders: 'World folders',
+    },
+    worlds: {
+      title: 'World Folders',
+      description:
+        'The map reads the world level-name points to (“{name}”), its Nether, End and datapack dimension folders, and every folder with a level.dat up to two folders below the server root{container}. Add folders it misses here, relative to the server root.',
+      container: ' and the world container “{path}”',
+      label: 'Extra world folders',
+      placeholder: 'For example worlds/survival',
+      found: 'Found',
+      notFound: 'No world here',
+      limit: 'At most {count} folders.',
+      save: 'Save',
+      saved: 'World folders saved.',
     },
     dimensions: {
       overworld: 'Overworld',
@@ -52,6 +71,7 @@ const translations = defineTranslations({
       teleported: 'Sent: {command}',
       teleportOffline: 'The server is not running.',
       teleportNotOnline: '{name} is not online.',
+      teleportNoKey: 'The server does not load this world, so nobody can be teleported into it.',
       onlineUnknown: 'Who is online could not be checked: {error}',
       refreshOnline: 'Check who is online',
       resetHeatmap: 'Reset the heatmap',
@@ -106,7 +126,7 @@ const translations = defineTranslations({
       deleteOnline: 'Stop the server to delete chunks.',
       deleteTitle: 'Delete Chunks',
       deleteContent:
-        'Delete {count} chunks in {dimension}? Their terrain, entities and points of interest are removed and generate again the next time they load. Builds in them are lost.',
+        'Delete {count} chunks in {place}? Their terrain, entities and points of interest are removed and generate again the next time they load. Builds in them are lost.',
       backup: 'Create a backup first: this cannot be undone from the map.',
       tooMany: 'Select at most {limit} chunks at once.',
       deleted: 'Deleted {deleted} chunks in {files} files.',
@@ -124,6 +144,8 @@ const translations = defineTranslations({
         'The heatmap counts where players were each time the server saved them (every few minutes while they are online).',
       select:
         'Chunk selection: drag a rectangle (Shift adds, the middle mouse button still pans) or tap chunks to toggle them. Selected chunks can be deleted while the server is stopped.',
+      worlds:
+        'Switch worlds and dimensions in the World Overview. Folders the map does not find by itself can be added there (gear button).',
       data: 'Everything is read from the server files, so the map shows the world as last saved.',
       menu: 'Right-click, or tap on a touch screen, to copy coordinates or teleport the selected player there.',
     },

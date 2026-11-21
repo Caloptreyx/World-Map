@@ -28,6 +28,8 @@ interface Props {
   onlineError: string | null;
   running: boolean;
   canTeleport: boolean;
+  /** Whether the shown world and dimension can be teleported into. */
+  canPickSpot: boolean;
   onLocate: (player: Player) => void;
   onTeleportTo: (player: Player, target: string) => void;
   onPick: (player: Player) => void;
@@ -121,7 +123,11 @@ export default function PlayersContent(props: Props) {
                     <Menu.Label>{t('players.teleportNotOnline', { name: playerLabel(selected) })}</Menu.Label>
                   ) : (
                     <>
-                      <Menu.Item onClick={() => props.onPick(selected)}>{t('players.teleportHere', {})}</Menu.Item>
+                      {props.canPickSpot ? (
+                        <Menu.Item onClick={() => props.onPick(selected)}>{t('players.teleportHere', {})}</Menu.Item>
+                      ) : (
+                        <Menu.Label>{t('players.teleportNoKey', {})}</Menu.Label>
+                      )}
                       {others.length > 0 && <Menu.Divider />}
                       {others.slice(0, 20).map((name) => (
                         <Menu.Item key={name} onClick={() => props.onTeleportTo(selected, name)}>

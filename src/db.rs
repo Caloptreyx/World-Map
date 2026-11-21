@@ -109,6 +109,29 @@ pub async fn set_sampled(db: &Database, server: Uuid, at: DateTime<Utc>) -> Resu
     Ok(())
 }
 
+/// The world folders added by hand for the server.
+pub async fn extra_worlds(db: &Database, server: Uuid) -> Result<Vec<String>, sqlx::Error> {
+    let row: Option<(Vec<String>,)> = sqlx::query_as(
+        "SELECT extra_worlds FROM dev_caloptreyx_worldmap_servers WHERE server_uuid = $1",
+    )
+    .bind(server)
+    .fetch_optional(db.read())
+    .await?;
+    Ok(row.map(|(paths,)| paths).unwrap_or_default())
+}
+
+pub async fn set_extra_worlds(db: &Database, server: Uuid, paths: &[String]) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO dev_caloptreyx_worldmap_servers (server_uuid, extra_worlds) VALUES ($1, $2)
+         ON CONFLICT (server_uuid) DO UPDATE SET extra_worlds = EXCLUDED.extra_worlds",
+    )
+    .bind(server)
+    .bind(paths)
+    .execute(db.write())
+    .await?;
+    Ok(())
+}
+
 /// Adds one sample per entry of `chunks` (`(x, z)`, repeats count twice).
 pub async fn add_heat(
     db: &Database,

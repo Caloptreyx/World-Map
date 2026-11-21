@@ -1,4 +1,4 @@
-import { faArrowRight } from '@fortawesome/free-solid-svg-icons';
+import { faArrowRight, faGear } from '@fortawesome/free-solid-svg-icons';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { useState } from 'react';
 import ActionIcon from '@/elements/buttons/ActionIcon.tsx';
@@ -7,13 +7,13 @@ import Select from '@/elements/input/Select.tsx';
 import Group from '@/elements/layout/Group.tsx';
 import SegmentedControl from '@/elements/layout/SegmentedControl.tsx';
 import Stack from '@/elements/layout/Stack.tsx';
+import Tooltip from '@/elements/overlays/Tooltip.tsx';
 import Text from '@/elements/typography/Text.tsx';
-import type { Overview, Place } from '../api.ts';
+import type { Overview, Place, World } from '../api.ts';
+import { mainProblem, VANILLA_DIMENSIONS } from '../lib/worlds.ts';
 import { type ExtT, useExtTranslations } from '../translations.ts';
 
-const VANILLA = ['minecraft:overworld', 'minecraft:the_nether', 'minecraft:the_end'];
-
-/** A dimension's name: vanilla ones translated, datapack ones from their id. */
+/** A dimension's name: vanilla ones translated, datapack and mod ones as their id. */
 export function dimensionLabel(t: ExtT, id: string): string {
   switch (id) {
     case 'minecraft:overworld':
@@ -23,14 +23,20 @@ export function dimensionLabel(t: ExtT, id: string): string {
     case 'minecraft:the_end':
       return t('dimensions.end', {});
     default:
-      return id
-        .split(':')
-        .pop()!
-        .split(/[_/]/)
-        .filter(Boolean)
-        .map((word) => word[0].toUpperCase() + word.slice(1))
-        .join(' ');
+      return id;
   }
+}
+
+/** A world's name: its folder, the main one marked. */
+export function worldLabel(t: ExtT, world: World): string {
+  return world.main ? t('overview.mainWorld', { name: world.name }) : world.name;
+}
+
+/** Where the map is: the world (when there are several) and the dimension. */
+export function placeLabel(t: ExtT, overview: Overview, place: Place): string {
+  const world = overview.worlds.find((candidate) => candidate.name === place.world);
+  const dimension = dimensionLabel(t, place.dimension);
+  return overview.worlds.length > 1 && world ? `${world.name} · ${dimension}` : dimension;
 }
 
 interface Props {
@@ -39,39 +45,62 @@ interface Props {
   regions: number | null;
   onPlace: (place: Place) => void;
   onJump: (x: number, z: number) => void;
+  /** Opens the world folder settings; absent without the permission. */
+  onFolders?: () => void;
 }
 
 /** The world and dimension, what the level says about them, and jumping to coordinates. */
-export default function OverviewContent({ overview, place, regions, onPlace, onJump }: Props) {
+export default function OverviewContent({ overview, place, regions, onPlace, onJump, onFolders }: Props) {
   const { t } = useExtTranslations();
   const [x, setX] = useState<number | string>('');
   const [z, setZ] = useState<number | string>('');
   const world = overview.worlds.find((candidate) => candidate.name === place.world);
   const dimensions = world?.dimensions ?? [];
-  const spawn = overview.level.spawn;
-  const vanillaOnly = dimensions.length > 1 && dimensions.every((dimension) => VANILLA.includes(dimension.id));
+  const spawn = world?.level.spawn ?? null;
+  const vanillaOnly =
+    dimensions.length > 1 && dimensions.every((dimension) => VANILLA_DIMENSIONS.includes(dimension.id));
+  const problem = mainProblem(overview);
+  const dimensionData = dimensions.map((dimension) => ({
+    value: dimension.id,
+    label: dimensionLabel(t, dimension.id),
+  }));
 
   return (
     <Stack gap='sm'>
       <Text className='wm-label'>{t('overview.description', {})}</Text>
-      {overview.worlds.length > 1 && (
+      {problem && (
+        <Text size='xs' c='yellow'>
+          {t(problem === 'missing' ? 'overview.levelMissing' : 'overview.levelEmpty', { name: overview.level_name })}
+        </Text>
+      )}
+      <Group gap={6} wrap='nowrap'>
         <Select
           size='sm'
+          style={{ flex: 1 }}
           aria-label={t('overview.world', {})}
-          data={overview.worlds.map((candidate) => candidate.name)}
+          data={overview.worlds.map((candidate) => ({ value: candidate.name, label: worldLabel(t, candidate) }))}
           value={place.world}
+          allowDeselect={false}
+          searchable={overview.worlds.length > 8}
           onChange={(name) => {
             const next = overview.worlds.find((candidate) => candidate.name === name);
             if (next) onPlace({ world: next.name, dimension: next.dimensions[0].id });
           }}
         />
-      )}
+        {onFolders && (
+          <Tooltip label={t('overview.folders', {})} withinPortal>
+            <ActionIcon size={36} variant='light' aria-label={t('overview.folders', {})} onClick={onFolders}>
+              <FontAwesomeIcon icon={faGear} />
+            </ActionIcon>
+          </Tooltip>
+        )}
+      </Group>
       {vanillaOnly ? (
         <SegmentedControl
           fullWidth
           size='xs'
           aria-label={t('overview.dimension', {})}
-          data={dimensions.map((dimension) => ({ value: dimension.id, label: dimensionLabel(t, dimension.id) }))}
+          data={dimensionData}
           value={place.dimension}
           onChange={(dimension) => onPlace({ world: place.world, dimension })}
         />
@@ -79,8 +108,9 @@ export default function OverviewContent({ overview, place, regions, onPlace, onJ
         <Select
           size='sm'
           aria-label={t('overview.dimension', {})}
-          data={dimensions.map((dimension) => ({ value: dimension.id, label: dimensionLabel(t, dimension.id) }))}
+          data={dimensionData}
           value={place.dimension}
+          allowDeselect={false}
           onChange={(dimension) => dimension && onPlace({ world: place.world, dimension })}
         />
       )}
@@ -93,10 +123,10 @@ export default function OverviewContent({ overview, place, regions, onPlace, onJ
             </span>
           </>
         )}
-        {overview.level.version && (
+        {world?.level.version && (
           <>
             <Text className='wm-label'>{t('overview.savedBy', {})}</Text>
-            <span className='wm-mono'>{overview.level.version}</span>
+            <span className='wm-mono'>{world.level.version}</span>
           </>
         )}
         {regions !== null && (

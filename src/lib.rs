@@ -94,6 +94,10 @@ impl Extension for ExtensionStruct {
                         "reset-heatmap",
                         "Allows clearing the collected player heatmap of the server.",
                     ),
+                    (
+                        "manage-worlds",
+                        "Allows adding world folders the map does not find by itself. Also needs permission to read file contents.",
+                    ),
                 ]),
             },
         )

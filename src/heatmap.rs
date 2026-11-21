@@ -110,7 +110,7 @@ async fn sample(
         return Ok(());
     }
     let layout = map.layout(false).await.map_err(failed("read the worlds"))?;
-    let Some(folder) = layout.worlds.first().and_then(|world| world.players.clone()) else {
+    let Some(folder) = layout.main().and_then(|world| world.players.clone()) else {
         db::set_sampled(&state.database, server.uuid, now).await?;
         return Ok(());
     };

@@ -14,7 +14,7 @@ use axum::{
     body::Body,
     extract::Query,
     http::{HeaderMap, StatusCode, header},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use futures_util::{StreamExt, stream};
 use serde::Deserialize;
@@ -82,10 +82,16 @@ async fn overview(
     let settings = &map.settings;
     ApiResponse::new_serialized(json!({
         "unsupported": layout.unsupported,
-        "too_old": layout.level.data_version.is_some_and(|version| version < OLDEST_DATA_VERSION),
+        "too_old": layout
+            .main()
+            .or(layout.worlds.first())
+            .and_then(|world| world.level.data_version)
+            .is_some_and(|version| version < OLDEST_DATA_VERSION),
         "level_name": layout.level_name,
-        "level": layout.level,
+        "main_folder": layout.main_folder,
+        "world_container": layout.world_container,
         "worlds": layout.worlds,
+        "extra_worlds": layout.extra_worlds,
         "power": power_name(power(&map).await),
         "capabilities": access::capabilities(&*permissions),
         "heatmap": {
@@ -96,6 +102,7 @@ async fn overview(
         "limits": {
             "delete_chunks": settings.max_delete_chunks,
             "entity_regions": ENTITY_REGIONS,
+            "extra_worlds": worlds::MAX_EXTRA,
         },
     }))
     .ok()
@@ -153,7 +160,7 @@ async fn tile(
         dimension.folder,
         coords::region_file_name(file.x, file.z)
     );
-    let ceiling = (dimension.id == worlds::NETHER).then_some(map.settings.nether_ceiling);
+    let ceiling = dimension.ceiling.then_some(map.settings.nether_ceiling);
     let etag = format!(
         "\"{}-{}-{}\"",
         tiles::variant(ceiling).replace(['"', ' '], ""),
@@ -184,7 +191,7 @@ async fn player_list(
     access::authorize(Action::View, &permissions, None)?;
     let map = Map::open(&state, &server).await?;
     let layout = map.layout(false).await?;
-    let Some(folder) = layout.worlds.first().and_then(|world| world.players.clone()) else {
+    let Some(folder) = layout.main().and_then(|world| world.players.clone()) else {
         return ApiResponse::new_serialized(json!({ "players": [] })).ok();
     };
     let mut files: Vec<_> = map
@@ -513,20 +520,6 @@ struct Teleport {
     target: Target,
 }
 
-/// Dimension ids as commands accept them (`namespace:path`).
-fn valid_dimension(id: &str) -> bool {
-    id.split_once(':').is_some_and(|(namespace, path)| {
-        !namespace.is_empty()
-            && !path.is_empty()
-            && namespace
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-.".contains(&b))
-            && path
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-./".contains(&b))
-    })
-}
-
 /// The console command for a teleport to a block position: the block's centre, in the target
 /// dimension.
 fn position_command(player: &str, dimension: &str, x: f64, y: f64, z: f64) -> String {
@@ -571,9 +564,11 @@ async fn teleport(
             }
             let layout = map.layout(false).await?;
             let (_, found) = layout.dimension(&world, &dimension)?;
-            if !valid_dimension(&found.id) {
-                return Err(bad_request("this dimension cannot be teleported to"));
-            }
+            let Some(key) = found.key.clone().filter(|key| worlds::valid_key(key)) else {
+                return Err(bad_request(
+                    "the server does not load this world, so nobody can be teleported there",
+                ));
+            };
             let y = match y {
                 Some(y) => y,
                 None => {
@@ -587,7 +582,7 @@ async fn teleport(
                         found.folder,
                         coords::region_file_name(region_x, region_z)
                     );
-                    let ceiling = (found.id == worlds::NETHER).then_some(map.settings.nether_ceiling);
+                    let ceiling = found.ceiling.then_some(map.settings.nether_ceiling);
                     let data = map
                         .read(&path, map.region_limit())
                         .await?
@@ -604,7 +599,7 @@ async fn teleport(
                     })? as f64
                 }
             };
-            position_command(&data.player, &found.id, x, y, z)
+            position_command(&data.player, &key, x, y, z)
         }
     };
     map.wings.commands(&[&command]).await?;
@@ -612,6 +607,50 @@ async fn teleport(
         .log("server:console.command", json!({ "command": command }))
         .await;
     ApiResponse::new_serialized(json!({ "command": command })).ok()
+}
+
+#[derive(Deserialize)]
+struct WorldSettings {
+    extra_worlds: Vec<String>,
+}
+
+/// The world folders added by hand: each must be a folder below the server root.
+fn extra_world_paths(input: &[String]) -> Result<Vec<String>, String> {
+    if input.len() > worlds::MAX_EXTRA {
+        return Err(format!("add at most {} world folders", worlds::MAX_EXTRA));
+    }
+    let mut paths = Vec::new();
+    for raw in input {
+        let path = worlds::relative_path(raw.trim()).ok_or_else(|| {
+            format!(
+                "{:?} is not a folder inside the server: use a path like worlds/survival, without .. or a leading /",
+                raw.trim()
+            )
+        })?;
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
+}
+
+async fn update_worlds(
+    state: GetState,
+    permissions: GetPermissionManager,
+    server: GetServer,
+    activity_logger: GetServerActivityLogger,
+    Payload(data): Payload<WorldSettings>,
+) -> ApiResponseResult {
+    access::authorize(Action::ManageWorlds, &permissions, None)?;
+    let paths = extra_world_paths(&data.extra_worlds).map_err(bad_request)?;
+    db::set_extra_worlds(&state.database, server.uuid, &paths).await?;
+    let map = Map::open(&state, &server).await?;
+    map.forget_layout();
+    let layout = map.layout(true).await?;
+    activity_logger
+        .log("server:worldmap.update-worlds", json!({ "extra_worlds": paths }))
+        .await;
+    ApiResponse::new_serialized(json!({ "extra_worlds": layout.extra_worlds })).ok()
 }
 
 pub fn router(state: &State) -> OpenApiRouter<State> {
@@ -625,6 +664,7 @@ pub fn router(state: &State) -> OpenApiRouter<State> {
         .route("/heatmap", get(heatmap).delete(reset_heatmap))
         .route("/chunks/delete", post(delete_chunks))
         .route("/teleport", post(teleport))
+        .route("/worlds", put(update_worlds))
         .with_state(state.clone())
 }
 
@@ -638,12 +678,25 @@ mod tests {
             position_command("Steve", "minecraft:the_nether", -10.2, 64.9, 3.0),
             "execute in minecraft:the_nether run tp Steve -10.5 64 3.5"
         );
-        assert!(valid_dimension("minecraft:overworld"));
-        assert!(valid_dimension("my_pack:caves/deep"));
-        assert!(!valid_dimension("minecraft"));
-        assert!(!valid_dimension("minecraft:over world"));
-        assert!(!valid_dimension("Minecraft:Overworld"));
-        assert!(!valid_dimension("a:b\nop Steve"));
+        // the key comes from the world's layout, never from the request
+        assert!(!worlds::valid_key("a:b\nop Steve"));
+    }
+
+    #[test]
+    fn hand_added_world_folders_stay_inside_the_server() {
+        let paths = |input: &[&str]| {
+            extra_world_paths(&input.iter().map(|path| path.to_string()).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            paths(&["worlds/survival", " ./arena/ ", "worlds/survival"]).unwrap(),
+            vec!["worlds/survival", "arena"]
+        );
+        assert_eq!(paths(&[]).unwrap(), Vec::<String>::new());
+        for bad in ["../other-server", "/etc", "worlds/../../x", "", "C:\\maps"] {
+            assert!(paths(&[bad]).is_err(), "{bad:?}");
+        }
+        let too_many: Vec<String> = (0..=worlds::MAX_EXTRA).map(|i| format!("w{i}")).collect();
+        assert!(extra_world_paths(&too_many).is_err());
     }
 
     #[test]

@@ -12,29 +12,52 @@ export type Power = 'offline' | 'starting' | 'running' | 'stopping' | 'unknown';
 export interface Dimension {
   id: string;
   folder: string;
+  /** What `execute in` takes on the running server; null when it does not load this world. */
+  key: string | null;
+  /** Drawn below a roof (the Nether, datapack dimensions with a ceiling). */
+  ceiling: boolean;
+}
+
+export interface LevelInfo {
+  data_version: number | null;
+  version: string | null;
+  spawn: [number, number, number] | null;
 }
 
 export interface World {
+  /** The folder below the server root, also the world's id. */
   name: string;
+  /** The world `level-name` points to. */
+  main: boolean;
+  /** Added by hand in the world folder settings. */
+  extra: boolean;
   dimensions: Dimension[];
   players: string | null;
+  level: LevelInfo;
+}
+
+export interface ExtraWorld {
+  path: string;
+  found: boolean;
 }
 
 export interface Overview {
   unsupported: 'egg' | 'bedrock' | 'not_minecraft' | null;
   too_old: boolean;
+  /** `level-name` as server.properties has it. */
   level_name: string;
-  level: {
-    data_version: number | null;
-    version: string | null;
-    spawn: [number, number, number] | null;
-  };
+  /** The folder `level-name` points to, when it exists. */
+  main_folder: string | null;
+  world_container: string | null;
+  /** The main world first. */
   worlds: World[];
+  extra_worlds: ExtraWorld[];
   power: Power;
   capabilities: {
     delete_chunks: boolean;
     teleport: boolean;
     reset_heatmap: boolean;
+    manage_worlds: boolean;
   };
   heatmap: {
     enabled: boolean;
@@ -44,6 +67,7 @@ export interface Overview {
   limits: {
     delete_chunks: number;
     entity_regions: number;
+    extra_worlds: number;
   };
 }
 
@@ -149,6 +173,9 @@ export const deleteChunks = async (
   rects: ChunkRect[],
 ): Promise<{ selected: number; deleted: number; files: number }> =>
   (await axiosInstance.post(`${base(server)}/chunks/delete`, { ...place, rects })).data;
+
+export const updateWorlds = async (server: string, paths: string[]): Promise<ExtraWorld[]> =>
+  (await axiosInstance.put(`${base(server)}/worlds`, { extra_worlds: paths })).data.extra_worlds;
 
 export const teleport = async (server: string, player: string, target: TeleportTarget): Promise<string> =>
   (await axiosInstance.post(`${base(server)}/teleport`, { player, target })).data.command;

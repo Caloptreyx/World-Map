@@ -42,9 +42,10 @@ import {
 } from '../api.ts';
 import FloatingPanel from '../components/FloatingPanel.tsx';
 import MapCanvas, { type Layers, type TileStatus } from '../components/MapCanvas.tsx';
-import OverviewContent, { dimensionLabel } from '../components/OverviewCard.tsx';
+import OverviewContent, { placeLabel } from '../components/OverviewCard.tsx';
 import PlayersContent, { avatarUrl, isOnline, playerLabel } from '../components/PlayerCard.tsx';
 import Toolbar from '../components/Toolbar.tsx';
+import WorldsModal from '../components/WorldsModal.tsx';
 import {
   type ChunkRect,
   chunkOf,
@@ -57,6 +58,7 @@ import {
   visibleBounds,
   visibleRegions,
 } from '../lib/geometry.ts';
+import { emptyReason, findPlace, initialPlace, showsSpawn } from '../lib/worlds.ts';
 import { useExtTranslations } from '../translations.ts';
 
 const DEFAULT_LAYERS: Layers = { players: true, markers: true, heatmap: false, mobs: true, entities: false };
@@ -77,14 +79,6 @@ function loadSaved(server: string): Partial<Saved> {
   } catch {
     return {};
   }
-}
-
-/** The place to open: the last one if it still exists, else the main world's first dimension. */
-function initialPlace(overview: Overview, saved: Partial<Saved>): Place | null {
-  const world = overview.worlds.find((candidate) => candidate.name === saved.place?.world);
-  if (world?.dimensions.some((dimension) => dimension.id === saved.place?.dimension)) return saved.place!;
-  const main = overview.worlds[0];
-  return main ? { world: main.name, dimension: main.dimensions[0].id } : null;
 }
 
 function useSize(ref: RefObject<HTMLDivElement | null>): Size {
@@ -139,6 +133,7 @@ export default function WorldMapPage() {
 /** The map, or why it cannot be shown. */
 function MapOrReason({ server, overview }: { server: string; overview: Overview }) {
   const { t } = useExtTranslations();
+  const empty = emptyReason(overview);
   const reason = overview.unsupported
     ? t(
         overview.unsupported === 'egg'
@@ -148,11 +143,13 @@ function MapOrReason({ server, overview }: { server: string; overview: Overview 
             : 'unsupported.notMinecraft',
         {},
       )
-    : overview.too_old
-      ? t('unsupported.tooOld', {})
-      : overview.worlds.length === 0
+    : empty === 'level_missing'
+      ? t('unsupported.levelMissing', { name: overview.level_name })
+      : empty === 'no_world'
         ? t('unsupported.noWorld', {})
-        : null;
+        : overview.too_old
+          ? t('unsupported.tooOld', {})
+          : null;
   if (!reason) return <WorldMap key={server} server={server} overview={overview} />;
   return (
     <Alert color='yellow' title={t('unsupported.title', {})}>
@@ -177,12 +174,13 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
   const power = useServerStore((state) => state.state);
   const running = power === 'running';
   const saved = useMemo(() => loadSaved(server), [server]);
-  const spawn = overview.level.spawn;
 
-  const [place, setPlace] = useState<Place>(() => initialPlace(overview, saved)!);
-  const [view, setView] = useState<View>(
-    () => saved.view ?? { x: spawn ? spawn[0] : 0, z: spawn ? spawn[2] : 0, zoom: 1 },
-  );
+  const [place, setPlace] = useState<Place>(() => initialPlace(overview.worlds, saved.place)!);
+  const [view, setView] = useState<View>(() => {
+    if (saved.view && saved.place?.world === place.world) return saved.view;
+    const spawn = overview.worlds.find((world) => world.name === place.world)?.level.spawn;
+    return { x: spawn ? spawn[0] : 0, z: spawn ? spawn[2] : 0, zoom: 1 };
+  });
   const [layers, setLayers] = useState<Layers>(() => ({ ...DEFAULT_LAYERS, ...saved.layers }));
   const [selecting, setSelecting] = useState(false);
   const [selection, setSelection] = useState<ChunkRect[]>([]);
@@ -195,6 +193,7 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
+  const [foldersOpen, setFoldersOpen] = useState(false);
   const container = useRef<HTMLDivElement>(null);
   const size = useSize(container);
   const fillHeight = useFillHeight(container);
@@ -203,6 +202,13 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
   useEffect(() => {
     localStorage.setItem(storageKey(server), JSON.stringify({ place, view, layers } satisfies Saved));
   }, [server, place, view, layers]);
+
+  // the world or dimension went away (folders or level-name changed): back to one that exists
+  useEffect(() => {
+    if (findPlace(overview.worlds, place)) return;
+    const next = initialPlace(overview.worlds, place);
+    if (next) setPlace(next);
+  }, [overview.worlds, place]);
 
   // leaving the browser's fullscreen (Esc) leaves the map's too
   useEffect(() => {
@@ -273,7 +279,11 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
   const onlineNow = online.data?.online ?? null;
   const selected = allPlayers.find((player) => player.uuid === selectedUuid) ?? null;
   const here = allPlayers.filter((player) => player.world === place.world && player.dimension === place.dimension);
-  const mainOverworld = place.world === overview.worlds[0]?.name && place.dimension === 'minecraft:overworld';
+  const current = findPlace(overview.worlds, place);
+  const spawn = current?.world.level.spawn ?? null;
+  const spawnHere = !!current && showsSpawn(current.world, place.dimension);
+  // the server must load this world under a known key to teleport into it
+  const canTeleportHere = !!current?.dimension.key;
   const chunkCount = useMemo(() => selectedChunks(selection), [selection]);
   const onlineCount = allPlayers.filter((player) => isOnline(onlineNow, player)).length;
 
@@ -282,6 +292,11 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
     setView((current) => ({ x, z, zoom: zoom ?? current.zoom }));
   };
   const changePlace = (target: Place) => {
+    // another world: its own spawn, the same coordinates mean nothing there
+    if (target.world !== place.world) {
+      const targetSpawn = overview.worlds.find((world) => world.name === target.world)?.level.spawn;
+      setView((now) => ({ x: targetSpawn ? targetSpawn[0] : 0, z: targetSpawn ? targetSpawn[2] : 0, zoom: now.zoom }));
+    }
     setPlace(target);
     setSelection([]);
   };
@@ -381,6 +396,14 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
         setView((current) => ({ ...current, x, z }));
         setSheet(null);
       }}
+      onFolders={
+        overview.capabilities.manage_worlds
+          ? () => {
+              setFoldersOpen(true);
+              setSheet(null);
+            }
+          : undefined
+      }
     />
   );
   const playersContent = (
@@ -392,6 +415,7 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
       onlineError={online.error ? httpErrorToHuman(online.error) : null}
       running={running}
       canTeleport={overview.capabilities.teleport}
+      canPickSpot={canTeleportHere}
       onLocate={locate}
       onTeleportTo={(player, name) => runTeleport(player, { type: 'player', name })}
       onPick={(player) => {
@@ -466,7 +490,7 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
         </div>
       )}
 
-      {layers.markers && mainOverworld && spawn && (
+      {layers.markers && spawnHere && spawn && (
         <div
           title={t('map.spawn', {})}
           style={{
@@ -519,7 +543,7 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
             onClick={() => setSheet(sheet === 'world' ? null : 'world')}
           >
             <FontAwesomeIcon icon={faEarthEurope} />
-            {dimensionLabel(t, place.dimension)}
+            {placeLabel(t, overview, place)}
           </button>
           <button
             type='button'
@@ -660,13 +684,12 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
           }}
           fullscreen={fullscreen}
           onFullscreen={toggleFullscreen}
-          onHome={() =>
-            goTo(
-              { world: overview.worlds[0].name, dimension: overview.worlds[0].dimensions[0].id },
-              spawn ? spawn[0] : 0,
-              spawn ? spawn[2] : 0,
-            )
-          }
+          onHome={() => {
+            // the shown world's spawn, in its first dimension
+            const world = current?.world ?? overview.worlds[0];
+            const home = world.level.spawn;
+            goTo({ world: world.name, dimension: world.dimensions[0].id }, home ? home[0] : 0, home ? home[2] : 0);
+          }}
           heatmapDays={overview.heatmap.retention_days}
         />
       </div>
@@ -764,7 +787,7 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
               >
                 {t('map.copyCoordinates', {})} ({Math.floor(menu.x)}, {Math.floor(menu.z)})
               </Button>
-              {overview.capabilities.teleport && selected?.name && running && (
+              {overview.capabilities.teleport && selected?.name && running && canTeleportHere && (
                 <Button
                   size='sm'
                   variant='subtle'
@@ -792,7 +815,7 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
       >
         <Stack gap='sm'>
           <Text size='sm'>
-            {t('selection.deleteContent', { count: chunkCount, dimension: dimensionLabel(t, place.dimension) })}
+            {t('selection.deleteContent', { count: chunkCount, place: placeLabel(t, overview, place) })}
           </Text>
           <Alert color='yellow'>{t('selection.backup', {})}</Alert>
         </Stack>
@@ -807,6 +830,16 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
       >
         <Text size='sm'>{t('players.resetHeatmapContent', {})}</Text>
       </ConfirmationModal>
+
+      {overview.capabilities.manage_worlds && (
+        <WorldsModal
+          key={String(foldersOpen)}
+          server={server}
+          overview={overview}
+          opened={foldersOpen}
+          onClose={() => setFoldersOpen(false)}
+        />
+      )}
     </div>
   );
 }

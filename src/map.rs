@@ -1,17 +1,19 @@
 //! A server as the map sees it: its Wings connection, its worlds (cached briefly) and region
-//! listings. Every path handed to Wings comes from the server's own folder listings, never from
-//! request input.
+//! listings. Every path handed to Wings comes from the server's own folder listings, its
+//! `server.properties` and `bukkit.yml`, or world folders checked by
+//! [`worlds::relative_path`], never from request input.
 use crate::{
     cache::Memo,
-    coords,
+    coords, db,
     files::Wings,
     nbt,
     settings::Settings,
-    worlds::{self, Dimension, Entry, LevelInfo, Lister, World},
+    worlds::{self, Dimension, Entry, Files, LevelInfo, World},
 };
 use axum::http::StatusCode;
+use futures_util::{StreamExt, stream};
 use serde::Serialize;
-use shared::{State, models::server::Server, response::ApiResponse};
+use shared::{State, database::Database, models::server::Server, response::ApiResponse};
 use std::{
     collections::HashMap,
     sync::{Arc, LazyLock},
@@ -19,12 +21,12 @@ use std::{
 };
 use uuid::Uuid;
 
-/// Small files read whole: `server.properties`, `level.dat`, `uid.dat`, `usercache.json`,
-/// player files.
+/// Small files read whole: `server.properties`, `bukkit.yml`, `level.dat`, `uid.dat`,
+/// `usercache.json`, player files.
 pub const SMALL_FILE: u64 = 8 << 20;
 
 #[async_trait::async_trait]
-impl Lister for Wings {
+impl Files for Wings {
     type Error = ApiResponse;
 
     async fn list(&self, path: &str) -> Result<Option<Vec<Entry>>, ApiResponse> {
@@ -38,6 +40,10 @@ impl Lister for Wings {
                 })
                 .collect()
         }))
+    }
+
+    async fn read(&self, path: &str, max: u64) -> Result<Option<Vec<u8>>, ApiResponse> {
+        Wings::read(self, &format!("/{path}"), max).await
     }
 }
 
@@ -53,11 +59,24 @@ pub enum Unsupported {
     NotMinecraft,
 }
 
+/// A world folder added by hand, and whether a world was found in it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ExtraWorld {
+    pub path: String,
+    pub found: bool,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Layout {
+    /// `level-name` as `server.properties` has it.
     pub level_name: String,
+    /// The folder `level-name` points to, when it exists.
+    pub main_folder: Option<String>,
+    /// Bukkit's world container (`bukkit.yml`), when one is set.
+    pub world_container: Option<String>,
+    /// The main world first.
     pub worlds: Vec<World>,
-    pub level: LevelInfo,
+    pub extra_worlds: Vec<ExtraWorld>,
     #[serde(skip)]
     pub properties: Option<String>,
     /// Bukkit's world UUIDs (`uid.dat`) to world folders.
@@ -68,6 +87,11 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// The world `level-name` points to, when it holds a world.
+    pub fn main(&self) -> Option<&World> {
+        self.worlds.first().filter(|world| world.main)
+    }
+
     pub fn world(&self, name: &str) -> Result<&World, ApiResponse> {
         self.worlds
             .iter()
@@ -84,7 +108,8 @@ impl Layout {
     }
 
     /// The world and dimension a player is in: Bukkit's world UUID when the player file has
-    /// one, else the main world with the player's dimension.
+    /// one, else the dimension key the player file names (Bukkit names other worlds
+    /// `minecraft:<world>`), else that dimension of the main world.
     pub fn locate(&self, world_uid: Option<Uuid>, dimension: &str) -> Option<(&World, &Dimension)> {
         if let Some(folder) = world_uid.and_then(|uid| self.uids.get(&uid)) {
             for world in &self.worlds {
@@ -102,7 +127,10 @@ impl Layout {
                 }
             }
         }
-        let main = self.worlds.first()?;
+        if let Some(found) = worlds::by_key(&self.worlds, dimension) {
+            return Some(found);
+        }
+        let main = self.main()?;
         Some((main, main.dimension(dimension)?))
     }
 }
@@ -124,9 +152,13 @@ static LAYOUTS: LazyLock<Memo<Uuid, Arc<Layout>>> =
     LazyLock::new(|| Memo::new(Duration::from_secs(30), 4096));
 static REGIONS: LazyLock<Memo<(Uuid, String), Arc<Vec<RegionFile>>>> =
     LazyLock::new(|| Memo::new(Duration::from_secs(10), 4096));
+/// Whether a datapack dimension (by its folder) has a ceiling; datapacks rarely change.
+static CEILINGS: LazyLock<Memo<(Uuid, String), bool>> =
+    LazyLock::new(|| Memo::new(Duration::from_secs(600), 4096));
 
 pub struct Map {
     pub wings: Wings,
+    pub database: Arc<Database>,
     pub server: Uuid,
     pub egg: Uuid,
     pub settings: Settings,
@@ -136,6 +168,7 @@ impl Map {
     pub async fn open(state: &State, server: &Server) -> Result<Self, ApiResponse> {
         Ok(Self {
             wings: Wings::connect(state, server).await?,
+            database: state.database.clone(),
             server: server.uuid,
             egg: server.egg.uuid,
             settings: crate::settings::load(state).await?,
@@ -164,8 +197,51 @@ impl Map {
         Ok(layout)
     }
 
+    /// Forgets the cached worlds after their settings changed.
+    pub fn forget_layout(&self) {
+        LAYOUTS.remove(&self.server);
+    }
+
+    /// What the world's `level.dat` says; nothing when it is missing or unreadable.
+    async fn level(&self, world: &str) -> LevelInfo {
+        match self.read(&format!("{world}/level.dat"), SMALL_FILE).await {
+            Ok(Some(bytes)) => nbt::decompress(&bytes)
+                .and_then(|data| nbt::read(&data))
+                .map(|root| worlds::level_info(&root))
+                .unwrap_or_default(),
+            _ => LevelInfo::default(),
+        }
+    }
+
+    /// Looks up which datapack dimensions of `world` have a ceiling.
+    async fn find_ceilings(&self, world: &mut World) {
+        let Some(datapacks) = world.datapacks.clone() else {
+            return;
+        };
+        let mut wanted = Vec::new();
+        for dimension in &mut world.dimensions {
+            if [worlds::OVERWORLD, worlds::NETHER, worlds::END].contains(&dimension.id.as_str()) {
+                continue;
+            }
+            match CEILINGS.get(&(self.server, dimension.folder.clone())) {
+                Some(ceiling) => dimension.ceiling = ceiling,
+                None => wanted.push(dimension.id.clone()),
+            }
+        }
+        if wanted.is_empty() {
+            return;
+        }
+        let found = worlds::ceilings(&self.wings, &datapacks, &wanted).await;
+        for dimension in &mut world.dimensions {
+            if let Some(&ceiling) = found.get(&dimension.id) {
+                dimension.ceiling = ceiling;
+                CEILINGS.insert((self.server, dimension.folder.clone()), ceiling);
+            }
+        }
+    }
+
     async fn load_layout(&self) -> Result<Layout, ApiResponse> {
-        let root = Lister::list(&self.wings, "").await?.unwrap_or_default();
+        let root = Files::list(&self.wings, "").await?.unwrap_or_default();
         let has_file = |name: &str| root.iter().any(|e| !e.directory && e.name == name);
         let unsupported = if !self.settings.allows_egg(self.egg) {
             Some(Unsupported::Egg)
@@ -179,8 +255,10 @@ impl Map {
         if let Some(reason) = unsupported {
             return Ok(Layout {
                 level_name: "world".into(),
+                main_folder: None,
+                world_container: None,
                 worlds: Vec::new(),
-                level: LevelInfo::default(),
+                extra_worlds: Vec::new(),
                 properties: None,
                 uids: HashMap::new(),
                 unsupported: Some(reason),
@@ -192,29 +270,67 @@ impl Map {
             .await?
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
         let level_name = worlds::level_name(properties.as_deref());
-        let worlds = worlds::detect(&self.wings, &level_name).await?;
-
-        let level = match self.read(&format!("{level_name}/level.dat"), SMALL_FILE).await? {
-            Some(bytes) => nbt::decompress(&bytes)
-                .and_then(|data| nbt::read(&data))
-                .map(|root| worlds::level_info(&root))
-                .unwrap_or_default(),
-            None => LevelInfo::default(),
+        let level_path = worlds::relative_path(&level_name);
+        let bukkit = has_file("bukkit.yml");
+        let world_container = if bukkit {
+            self.read("bukkit.yml", SMALL_FILE)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|bytes| worlds::world_container(&String::from_utf8_lossy(&bytes)))
+        } else {
+            None
         };
+        let extra = db::extra_worlds(&self.database, self.server).await?;
+        let detected = worlds::detect(
+            &self.wings,
+            &worlds::Options {
+                level_name: level_path.as_deref(),
+                container: world_container.as_deref(),
+                extra: &extra,
+                bukkit,
+            },
+        )
+        .await?;
+        let mut worlds = detected.worlds;
+
+        let names: Vec<String> = worlds.iter().map(|world| world.name.clone()).collect();
+        let levels: Vec<LevelInfo> = stream::iter(names)
+            .map(|name| async move { self.level(&name).await })
+            .buffered(6)
+            .collect()
+            .await;
+        for (world, level) in worlds.iter_mut().zip(levels) {
+            world.level = level;
+        }
+        for world in &mut worlds {
+            self.find_ceilings(world).await;
+        }
 
         let mut uids = HashMap::new();
         for folder in worlds.iter().flat_map(|world| world.folders.iter()) {
-            if let Some(bytes) = self.read(&format!("{folder}/uid.dat"), 64).await?
+            if let Ok(Some(bytes)) = self.read(&format!("{folder}/uid.dat"), 64).await
                 && let Ok(raw) = <[u8; 16]>::try_from(bytes.as_slice())
             {
                 uids.insert(Uuid::from_bytes(raw), folder.clone());
             }
         }
 
+        let extra_worlds = extra
+            .into_iter()
+            .map(|path| ExtraWorld {
+                found: worlds
+                    .iter()
+                    .any(|world| world.name == path || world.folders.contains(&path)),
+                path,
+            })
+            .collect();
         Ok(Layout {
             level_name,
+            main_folder: detected.main_folder,
+            world_container,
             worlds,
-            level,
+            extra_worlds,
             properties,
             uids,
             unsupported: None,
@@ -264,32 +380,51 @@ impl Map {
 mod tests {
     use super::*;
 
-    fn layout() -> Layout {
-        let world = |name: &str, dimensions: &[(&str, &str)]| World {
+    fn world(name: &str, dimensions: &[(&str, &str, Option<&str>)]) -> World {
+        World {
             name: name.into(),
+            main: false,
+            extra: false,
             dimensions: dimensions
                 .iter()
-                .map(|(id, folder)| Dimension {
+                .map(|(id, folder, key)| Dimension {
                     id: id.to_string(),
                     folder: folder.to_string(),
+                    key: key.map(str::to_string),
+                    ceiling: false,
                 })
                 .collect(),
             players: None,
+            level: LevelInfo::default(),
             folders: vec![name.into()],
+            datapacks: None,
             level_modified: 0,
-        };
+        }
+    }
+
+    fn layout() -> Layout {
         let mut main = world(
             "world",
             &[
-                (worlds::OVERWORLD, "world"),
-                (worlds::NETHER, "world_nether/DIM-1"),
+                (worlds::OVERWORLD, "world", Some(worlds::OVERWORLD)),
+                (worlds::NETHER, "world_nether/DIM-1", Some(worlds::NETHER)),
             ],
         );
+        main.main = true;
         main.folders.push("world_nether".into());
         Layout {
             level_name: "world".into(),
-            worlds: vec![main, world("creative", &[(worlds::OVERWORLD, "creative")])],
-            level: LevelInfo::default(),
+            main_folder: Some("world".into()),
+            world_container: None,
+            worlds: vec![
+                main,
+                world(
+                    "creative",
+                    &[(worlds::OVERWORLD, "creative", Some("minecraft:creative"))],
+                ),
+                world("old", &[(worlds::OVERWORLD, "old", None)]),
+            ],
+            extra_worlds: Vec::new(),
             properties: None,
             uids: HashMap::from([
                 (Uuid::from_u128(1), "world".into()),
@@ -327,7 +462,13 @@ mod tests {
             located(&layout, None, worlds::NETHER),
             at("world", worlds::NETHER)
         );
+        // Paper's per-world key, without a uid.dat to go by
+        assert_eq!(
+            located(&layout, None, "minecraft:creative"),
+            at("creative", worlds::OVERWORLD)
+        );
         assert_eq!(located(&layout, None, worlds::END), None);
+        assert_eq!(located(&layout, None, "minecraft:old"), None);
         assert_eq!(
             located(&layout, Some(9), worlds::OVERWORLD),
             at("world", worlds::OVERWORLD)
