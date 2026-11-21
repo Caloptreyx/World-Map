@@ -13,7 +13,7 @@ use crate::{
 use axum::{
     body::Body,
     extract::Query,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode, header},
     routing::{get, post},
 };
 use futures_util::{StreamExt, stream};
@@ -129,10 +129,13 @@ struct TileQuery {
     z: i32,
 }
 
+/// A region tile. Browsers revalidate it every time (`ETag` from the file's state and the
+/// renderer), so a re-rendered tile is never served stale from their cache.
 async fn tile(
     state: GetState,
     permissions: GetPermissionManager,
     server: GetServer,
+    headers: HeaderMap,
     Query(query): Query<TileQuery>,
 ) -> ApiResponseResult {
     access::authorize(Action::View, &permissions, None)?;
@@ -151,10 +154,26 @@ async fn tile(
         coords::region_file_name(file.x, file.z)
     );
     let ceiling = (dimension.id == worlds::NETHER).then_some(map.settings.nether_ceiling);
+    let etag = format!(
+        "\"{}-{}-{}\"",
+        tiles::variant(ceiling).replace(['"', ' '], ""),
+        file.modified,
+        file.size
+    );
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|tag| tag.trim() == etag))
+    {
+        return Ok(ApiResponse::new(Body::empty())
+            .with_status(StatusCode::NOT_MODIFIED)
+            .with_header("ETag", &etag));
+    }
     let png = tiles::png(&state, &map, &path, file, ceiling).await?;
     Ok(ApiResponse::new(Body::from(png))
         .with_header("Content-Type", "image/png")
-        .with_header("Cache-Control", "private, max-age=86400"))
+        .with_header("Cache-Control", "private, no-cache")
+        .with_header("ETag", &etag))
 }
 
 async fn player_list(
