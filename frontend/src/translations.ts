@@ -99,7 +99,7 @@ const translations = defineTranslations({
     selection: {
       hint: 'Drag to select chunks, Shift adds, a click toggles one chunk. Esc clears.',
       hintTouch: 'Tap chunks to toggle them, or press and hold, then drag, to add a rectangle.',
-      count: '{count} chunks selected',
+      count: 'Chunks selected: {count}',
       clear: 'Clear',
       copy: 'Copy coordinates',
       delete: 'Delete chunks',

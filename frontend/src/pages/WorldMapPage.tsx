@@ -573,7 +573,7 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
         onClose={() => setSheet(null)}
         position='bottom'
         radius='lg'
-        styles={{ content: { height: 'auto', maxHeight: '85dvh', flex: 'none' } }}
+        styles={{ content: { height: 'auto', maxHeight: '85dvh', flex: '0 0 100%', width: '100%' } }}
         title={
           <Group gap={8} wrap='nowrap'>
             <FontAwesomeIcon icon={sheet === 'players' ? faUsers : faEarthEurope} />
