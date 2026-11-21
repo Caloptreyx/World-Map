@@ -518,7 +518,17 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
       </div>
 
       {(selecting || picking) && (
-        <div style={{ position: 'absolute', bottom: 72, left: '50%', transform: 'translateX(-50%)', zIndex: 5 }}>
+        <div
+          style={{
+            position: 'absolute',
+            bottom: 72,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            width: 'max-content',
+            maxWidth: '95%',
+            zIndex: 5,
+          }}
+        >
           <Paper withBorder radius='md' px='sm' py={8} style={CARD_STYLE}>
             {picking ? (
               <Text size='sm'>{t('players.teleportHint', { name: playerLabel(picking) })}</Text>

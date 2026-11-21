@@ -220,7 +220,7 @@ export default function MapCanvas(props: Props) {
       }
 
       if (props.selecting && chunkSize >= 6) {
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.25)';
         ctx.lineWidth = 1;
         ctx.beginPath();
         const [originX, originY] = toScreen(view, size, 0, 0);

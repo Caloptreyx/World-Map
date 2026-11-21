@@ -111,9 +111,11 @@ Every write is logged: `server:file.write` per rewritten region file,
 
 Deleting rewrites the region files of the selected chunks without them (in `region/`, and in
 `entities/` and `poi/` so no old mobs or villager workstations stay behind); the other chunks are
-kept byte for byte. It only runs while the server is offline (checked again before every file),
-after a confirmation naming the count. The game generates the chunks again when they next load.
-Wings keeps a revision of each rewritten file, but **make a backup first**.
+kept byte for byte. It only runs while the server is offline (checked again before every file;
+the state comes from the node's status report the panel itself shows, which can be up to 15
+seconds old, so do not start the server while a deletion runs), after a confirmation naming the
+count. The game generates the chunks again when they next load. Wings keeps a revision of each
+rewritten file, but **make a backup first**.
 
 ## Limits
 
