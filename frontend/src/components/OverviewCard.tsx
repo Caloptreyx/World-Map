@@ -92,8 +92,8 @@ export default function OverviewCard({ overview, place, onPlace, onJump }: Props
           }}
         >
           <Group gap={6} wrap='nowrap' align='flex-end'>
-            <NumberInput size='xs' placeholder='X' value={x} onChange={setX} hideControls allowDecimal />
-            <NumberInput size='xs' placeholder='Z' value={z} onChange={setZ} hideControls allowDecimal />
+            <NumberInput size='xs' w={96} placeholder='X' value={x} onChange={setX} hideControls allowDecimal />
+            <NumberInput size='xs' w={96} placeholder='Z' value={z} onChange={setZ} hideControls allowDecimal />
             <Button size='xs' type='submit' disabled={typeof x !== 'number' || typeof z !== 'number'}>
               {t('overview.jumpButton', {})}
             </Button>
