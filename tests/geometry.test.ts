@@ -4,7 +4,9 @@ import {
   chunkOf,
   chunkRect,
   cluster,
+  clusterCell,
   heatColour,
+  pinchView,
   MAX_ZOOM,
   MIN_ZOOM,
   regionOf,
@@ -14,6 +16,7 @@ import {
   toWorld,
   visibleBounds,
   visibleRegions,
+  toggleChunk,
   zoomAt,
 } from '../frontend/src/lib/geometry.ts';
 
@@ -88,6 +91,52 @@ describe('chunk selection', () => {
       ]),
       '-16 0 -> 15 31\n32 32 -> 47 47',
     );
+  });
+});
+
+describe('touch', () => {
+  test('tapping toggles single chunks, splitting larger selections around them', () => {
+    const added = toggleChunk([], 3, -2);
+    assert.deepEqual(added, [{ x1: 3, z1: -2, x2: 3, z2: -2 }]);
+    assert.deepEqual(toggleChunk(added, 3, -2), []);
+    const square = [{ x1: 0, z1: 0, x2: 2, z2: 2 }];
+    const holed = toggleChunk(square, 1, 1);
+    assert.equal(selectedChunks(holed), 8);
+    assert.ok(!holed.some((r) => r.x1 <= 1 && 1 <= r.x2 && r.z1 <= 1 && 1 <= r.z2));
+    assert.equal(selectedChunks(toggleChunk(holed, 1, 1)), 9);
+    // a chunk inside two overlapping rectangles leaves both (11 chunks in the union, minus one)
+    const twice = toggleChunk([square[0], { x1: 1, z1: 1, x2: 4, z2: 1 }], 1, 1);
+    assert.equal(selectedChunks(twice), 10);
+  });
+
+  test('pinching zooms around the fingers and follows them', () => {
+    const start = { x: 100, z: 100, zoom: 1 };
+    const from: [[number, number], [number, number]] = [
+      [300, 300],
+      [500, 300],
+    ];
+    const spread: [[number, number], [number, number]] = [
+      [200, 300],
+      [600, 300],
+    ];
+    const view = pinchView(start, size, from, spread);
+    assert.equal(view.zoom, 2);
+    // the block under the midpoint stays under the midpoint
+    const before = toWorld(start, size, 400, 300);
+    const after = toWorld(view, size, 400, 300);
+    assert.ok(Math.abs(before[0] - after[0]) < 1e-9 && Math.abs(before[1] - after[1]) < 1e-9);
+    // moving both fingers pans
+    const moved = pinchView(start, size, from, [
+      [350, 300],
+      [550, 300],
+    ]);
+    assert.equal(moved.zoom, 1);
+    assert.equal(moved.x, start.x - 50);
+  });
+
+  test('entity groups get coarser as the map zooms out', () => {
+    assert.ok(clusterCell(0.5) > clusterCell(1.5));
+    assert.ok(clusterCell(1.5) > clusterCell(8));
   });
 });
 

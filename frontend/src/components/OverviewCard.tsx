@@ -1,14 +1,17 @@
+import { faArrowRight } from '@fortawesome/free-solid-svg-icons';
+import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { useState } from 'react';
-import Button from '@/elements/buttons/Button.tsx';
-import Badge from '@/elements/data-display/Badge.tsx';
+import ActionIcon from '@/elements/buttons/ActionIcon.tsx';
 import NumberInput from '@/elements/input/NumberInput.tsx';
 import Select from '@/elements/input/Select.tsx';
 import Group from '@/elements/layout/Group.tsx';
-import Paper from '@/elements/layout/Paper.tsx';
+import SegmentedControl from '@/elements/layout/SegmentedControl.tsx';
 import Stack from '@/elements/layout/Stack.tsx';
 import Text from '@/elements/typography/Text.tsx';
 import type { Overview, Place } from '../api.ts';
 import { type ExtT, useExtTranslations } from '../translations.ts';
+
+const VANILLA = ['minecraft:overworld', 'minecraft:the_nether', 'minecraft:the_end'];
 
 /** A dimension's name: vanilla ones translated, datapack ones from their id. */
 export function dimensionLabel(t: ExtT, id: string): string {
@@ -30,98 +33,102 @@ export function dimensionLabel(t: ExtT, id: string): string {
   }
 }
 
-export const CARD_STYLE = {
-  background: 'color-mix(in srgb, var(--mantine-color-body) 88%, transparent)',
-  backdropFilter: 'blur(6px)',
-} as const;
-
 interface Props {
   overview: Overview;
   place: Place;
+  regions: number | null;
   onPlace: (place: Place) => void;
   onJump: (x: number, z: number) => void;
 }
 
-export default function OverviewCard({ overview, place, onPlace, onJump }: Props) {
+/** The world and dimension, what the level says about them, and jumping to coordinates. */
+export default function OverviewContent({ overview, place, regions, onPlace, onJump }: Props) {
   const { t } = useExtTranslations();
   const [x, setX] = useState<number | string>('');
   const [z, setZ] = useState<number | string>('');
   const world = overview.worlds.find((candidate) => candidate.name === place.world);
+  const dimensions = world?.dimensions ?? [];
   const spawn = overview.level.spawn;
+  const vanillaOnly = dimensions.length > 1 && dimensions.every((dimension) => VANILLA.includes(dimension.id));
 
   return (
-    <Paper withBorder radius='md' p='sm' w={300} style={CARD_STYLE}>
-      <Stack gap='xs'>
-        <Group justify='space-between' wrap='nowrap'>
-          <Text fw={600}>{t('overview.title', {})}</Text>
-          <Badge variant='light' size='sm'>
-            {t('overview.badge', {})}
-          </Badge>
-        </Group>
-        <Text size='xs' c='dimmed'>
-          {t('overview.description', {})}
-        </Text>
-        <Group justify='space-between' gap={4}>
-          <Text size='xs' c='dimmed'>
-            {t('overview.lastView', {})}
-          </Text>
-          <Text size='xs'>{dimensionLabel(t, place.dimension)}</Text>
-        </Group>
+    <Stack gap='sm'>
+      <Text className='wm-label'>{t('overview.description', {})}</Text>
+      {overview.worlds.length > 1 && (
+        <Select
+          size='sm'
+          aria-label={t('overview.world', {})}
+          data={overview.worlds.map((candidate) => candidate.name)}
+          value={place.world}
+          onChange={(name) => {
+            const next = overview.worlds.find((candidate) => candidate.name === name);
+            if (next) onPlace({ world: next.name, dimension: next.dimensions[0].id });
+          }}
+        />
+      )}
+      {vanillaOnly ? (
+        <SegmentedControl
+          fullWidth
+          size='xs'
+          aria-label={t('overview.dimension', {})}
+          data={dimensions.map((dimension) => ({ value: dimension.id, label: dimensionLabel(t, dimension.id) }))}
+          value={place.dimension}
+          onChange={(dimension) => onPlace({ world: place.world, dimension })}
+        />
+      ) : (
+        <Select
+          size='sm'
+          aria-label={t('overview.dimension', {})}
+          data={dimensions.map((dimension) => ({ value: dimension.id, label: dimensionLabel(t, dimension.id) }))}
+          value={place.dimension}
+          onChange={(dimension) => dimension && onPlace({ world: place.world, dimension })}
+        />
+      )}
+      <div className='wm-facts'>
         {spawn && (
-          <Group justify='space-between' gap={4}>
-            <Text size='xs' c='dimmed'>
-              {t('overview.spawn', {})}
-            </Text>
-            <Text size='xs' ff='monospace'>
-              X {spawn[0].toFixed(2)} · Y {spawn[1].toFixed(2)} · Z {spawn[2].toFixed(2)}
-            </Text>
-          </Group>
+          <>
+            <Text className='wm-label'>{t('overview.spawn', {})}</Text>
+            <span className='wm-mono'>
+              {spawn[0].toFixed(0)}, {spawn[1].toFixed(0)}, {spawn[2].toFixed(0)}
+            </span>
+          </>
         )}
         {overview.level.version && (
-          <Text size='xs' c='dimmed'>
-            {t('overview.version', { version: overview.level.version })}
-          </Text>
+          <>
+            <Text className='wm-label'>{t('overview.savedBy', {})}</Text>
+            <span className='wm-mono'>{overview.level.version}</span>
+          </>
         )}
-        <Text size='xs' fw={500} mt={4}>
+        {regions !== null && (
+          <>
+            <Text className='wm-label'>{t('overview.regions', {})}</Text>
+            <span className='wm-mono'>{regions}</span>
+          </>
+        )}
+      </div>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (typeof x === 'number' && typeof z === 'number') onJump(x, z);
+        }}
+      >
+        <Text className='wm-label' mb={4}>
           {t('overview.jump', {})}
         </Text>
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (typeof x === 'number' && typeof z === 'number') onJump(x, z);
-          }}
-        >
-          <Group gap={6} wrap='nowrap' align='flex-end'>
-            <NumberInput size='xs' w={96} placeholder='X' value={x} onChange={setX} hideControls allowDecimal />
-            <NumberInput size='xs' w={96} placeholder='Z' value={z} onChange={setZ} hideControls allowDecimal />
-            <Button size='xs' type='submit' disabled={typeof x !== 'number' || typeof z !== 'number'}>
-              {t('overview.jumpButton', {})}
-            </Button>
-          </Group>
-        </form>
         <Group gap={6} wrap='nowrap'>
-          <Select
-            size='xs'
-            label={t('overview.world', {})}
-            data={overview.worlds.map((candidate) => candidate.name)}
-            value={place.world}
-            onChange={(name) => {
-              const next = overview.worlds.find((candidate) => candidate.name === name);
-              if (next) onPlace({ world: next.name, dimension: next.dimensions[0].id });
-            }}
-          />
-          <Select
-            size='xs'
-            label={t('overview.dimension', {})}
-            data={(world?.dimensions ?? []).map((dimension) => ({
-              value: dimension.id,
-              label: dimensionLabel(t, dimension.id),
-            }))}
-            value={place.dimension}
-            onChange={(dimension) => dimension && onPlace({ world: place.world, dimension })}
-          />
+          <NumberInput size='sm' style={{ flex: 1 }} placeholder='X' value={x} onChange={setX} hideControls />
+          <NumberInput size='sm' style={{ flex: 1 }} placeholder='Z' value={z} onChange={setZ} hideControls />
+          <ActionIcon
+            type='submit'
+            size={36}
+            variant='light'
+            aria-label={t('overview.jumpButton', {})}
+            disabled={typeof x !== 'number' || typeof z !== 'number'}
+          >
+            <FontAwesomeIcon icon={faArrowRight} />
+          </ActionIcon>
         </Group>
-      </Stack>
-    </Paper>
+      </form>
+    </Stack>
   );
 }

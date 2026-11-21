@@ -1,18 +1,26 @@
-import { faCopy, faLocationArrow, faLocationDot } from '@fortawesome/free-solid-svg-icons';
+import {
+  faCopy,
+  faEarthEurope,
+  faLocationArrow,
+  faLocationDot,
+  faTrash,
+  faUsers,
+} from '@fortawesome/free-solid-svg-icons';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import { useDebouncedValue } from '@mantine/hooks';
+import { useDebouncedValue, useMediaQuery } from '@mantine/hooks';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { httpErrorToHuman } from '@/api/axios.ts';
+import ActionIcon from '@/elements/buttons/ActionIcon.tsx';
 import Button from '@/elements/buttons/Button.tsx';
 import ServerContentContainer from '@/elements/containers/ServerContentContainer.tsx';
+import Badge from '@/elements/data-display/Badge.tsx';
 import Alert from '@/elements/feedback/Alert.tsx';
-import Spinner from '@/elements/feedback/Spinner.tsx';
 import Group from '@/elements/layout/Group.tsx';
-import Paper from '@/elements/layout/Paper.tsx';
 import Stack from '@/elements/layout/Stack.tsx';
 import ConfirmationModal from '@/elements/modals/ConfirmationModal.tsx';
-import { Modal } from '@/elements/modals/Modal.tsx';
+import Drawer from '@/elements/overlays/Drawer.tsx';
+import Tooltip from '@/elements/overlays/Tooltip.tsx';
 import Text from '@/elements/typography/Text.tsx';
 import { useToast } from '@/providers/ToastProvider.tsx';
 import { useServerStore } from '@/stores/server.ts';
@@ -32,9 +40,10 @@ import {
   teleport,
   type TeleportTarget,
 } from '../api.ts';
+import FloatingPanel from '../components/FloatingPanel.tsx';
 import MapCanvas, { type Layers, type TileStatus } from '../components/MapCanvas.tsx';
-import OverviewCard, { CARD_STYLE, dimensionLabel } from '../components/OverviewCard.tsx';
-import PlayerCard, { avatarUrl, playerLabel } from '../components/PlayerCard.tsx';
+import OverviewContent, { dimensionLabel } from '../components/OverviewCard.tsx';
+import PlayersContent, { avatarUrl, isOnline, playerLabel } from '../components/PlayerCard.tsx';
 import Toolbar from '../components/Toolbar.tsx';
 import {
   type ChunkRect,
@@ -51,6 +60,8 @@ import {
 import { useExtTranslations } from '../translations.ts';
 
 const DEFAULT_LAYERS: Layers = { players: true, markers: true, heatmap: false, mobs: true, entities: false };
+/** Below this map width the panels become sheets and the toolbar folds its layers into a menu. */
+const COMPACT_WIDTH = 900;
 
 interface Saved {
   place: Place;
@@ -76,7 +87,7 @@ function initialPlace(overview: Overview, saved: Partial<Saved>): Place | null {
   return main ? { world: main.name, dimension: main.dimensions[0].id } : null;
 }
 
-function useSize(ref: React.RefObject<HTMLDivElement | null>): Size {
+function useSize(ref: RefObject<HTMLDivElement | null>): Size {
   const [size, setSize] = useState<Size>({ width: 0, height: 0 });
   useEffect(() => {
     const element = ref.current;
@@ -90,15 +101,32 @@ function useSize(ref: React.RefObject<HTMLDivElement | null>): Size {
   return size;
 }
 
+/** The height that fills the window below the element's top edge (the map takes the rest of the
+ * screen instead of a fixed share of it). */
+function useFillHeight(ref: RefObject<HTMLDivElement | null>): number {
+  const [height, setHeight] = useState(560);
+  useEffect(() => {
+    const measure = () => {
+      const top = ref.current?.getBoundingClientRect().top ?? 0;
+      setHeight(Math.max(360, Math.round(window.innerHeight - top - 16)));
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [ref.current]);
+  return height;
+}
+
 export default function WorldMapPage() {
   const { t } = useExtTranslations();
   const server = useServerStore((state) => state.server.uuid);
+  const phone = useMediaQuery('(max-width: 48em)');
   const overview = useQuery({ queryKey: [PACKAGE, server, 'overview'], queryFn: () => getOverview(server) });
 
   return (
-    <ServerContentContainer title={t('title', {})} subtitle={t('subtitle', {})}>
+    <ServerContentContainer title={t('title', {})} subtitle={t('subtitle', {})} hideTitleComponent={phone}>
       {overview.isLoading ? (
-        <Spinner.Centered />
+        <div className='wm-skeleton' style={{ height: 'min(70dvh, 640px)' }} aria-busy='true' />
       ) : overview.error ? (
         <Alert color='red'>{httpErrorToHuman(overview.error)}</Alert>
       ) : overview.data ? (
@@ -140,6 +168,8 @@ interface MenuState {
   top: number;
 }
 
+type Sheet = 'world' | 'players' | null;
+
 function WorldMap({ server, overview }: { server: string; overview: Overview }) {
   const { t } = useExtTranslations();
   const { addToast } = useToast();
@@ -160,20 +190,25 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
   const [selectedUuid, setSelectedUuid] = useState<string | null>(null);
   const [picking, setPicking] = useState<Player | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
+  const [sheet, setSheet] = useState<Sheet>(null);
   const [tileStatus, setTileStatus] = useState<TileStatus>({ loading: 0, skipped: 0, error: null });
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
-  const [help, setHelp] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const container = useRef<HTMLDivElement>(null);
   const size = useSize(container);
+  const fillHeight = useFillHeight(container);
+  const compact = size.width > 0 && size.width < COMPACT_WIDTH;
 
   useEffect(() => {
     localStorage.setItem(storageKey(server), JSON.stringify({ place, view, layers } satisfies Saved));
   }, [server, place, view, layers]);
 
+  // leaving the browser's fullscreen (Esc) leaves the map's too
   useEffect(() => {
-    const onChange = () => setFullscreen(document.fullscreenElement === container.current);
+    const onChange = () => {
+      if (!document.fullscreenElement) setFullscreen(false);
+    };
     document.addEventListener('fullscreenchange', onChange);
     return () => document.removeEventListener('fullscreenchange', onChange);
   }, []);
@@ -235,10 +270,12 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
   });
 
   const allPlayers = players.data ?? [];
+  const onlineNow = online.data?.online ?? null;
   const selected = allPlayers.find((player) => player.uuid === selectedUuid) ?? null;
   const here = allPlayers.filter((player) => player.world === place.world && player.dimension === place.dimension);
   const mainOverworld = place.world === overview.worlds[0]?.name && place.dimension === 'minecraft:overworld';
   const chunkCount = useMemo(() => selectedChunks(selection), [selection]);
+  const onlineCount = allPlayers.filter((player) => isOnline(onlineNow, player)).length;
 
   const goTo = (target: Place, x: number, z: number, zoom?: number) => {
     setPlace({ world: target.world, dimension: target.dimension });
@@ -248,7 +285,11 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
     setPlace(target);
     setSelection([]);
   };
-  const locate = (player: Player) => goTo(player, player.x, player.z, Math.max(view.zoom, 2));
+  const locate = (player: Player) => {
+    goTo(player, player.x, player.z, Math.max(view.zoom, 2));
+    setSelectedUuid(player.uuid);
+    setSheet(null);
+  };
 
   const runTeleport = async (player: Player, target: TeleportTarget) => {
     try {
@@ -271,10 +312,23 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
     const rect = container.current!.getBoundingClientRect();
     setMenu({ x, z, left: clientX - rect.left, top: clientY - rect.top });
   }, []);
+  const onTap = useCallback(
+    (x: number, z: number, clientX: number, clientY: number) => {
+      setCursor([x, z]);
+      onMenu(x, z, clientX, clientY);
+    },
+    [onMenu],
+  );
 
   const toggleFullscreen = () => {
-    if (document.fullscreenElement) document.exitFullscreen();
-    else container.current?.requestFullscreen();
+    if (fullscreen) {
+      setFullscreen(false);
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    } else {
+      setFullscreen(true);
+      // iOS Safari has no element fullscreen: the map still covers the page
+      document.documentElement.requestFullscreen?.().catch(() => {});
+    }
   };
 
   const runDelete = async () => {
@@ -309,20 +363,71 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
     tileStatus.error ? t('map.tileFailed', { error: tileStatus.error }) : null,
     (layers.mobs || layers.entities) && !entityArea ? t('map.zoomInEntities', {}) : null,
     entities.data?.truncated ? t('map.entitiesTruncated', { count: entities.data.entities.length }) : null,
+    layers.heatmap && heat.data && heat.data.max === 0
+      ? t(overview.heatmap.enabled ? 'heatmap.empty' : 'heatmap.disabled', {})
+      : null,
   ].filter((notice): notice is string => !!notice);
+
+  const overviewContent = (
+    <OverviewContent
+      overview={overview}
+      place={place}
+      regions={regions.data?.length ?? null}
+      onPlace={(target) => {
+        changePlace(target);
+        setSheet(null);
+      }}
+      onJump={(x, z) => {
+        setView((current) => ({ ...current, x, z }));
+        setSheet(null);
+      }}
+    />
+  );
+  const playersContent = (
+    <PlayersContent
+      players={allPlayers}
+      selected={selected}
+      onSelect={setSelectedUuid}
+      online={onlineNow}
+      onlineError={online.error ? httpErrorToHuman(online.error) : null}
+      running={running}
+      canTeleport={overview.capabilities.teleport}
+      onLocate={locate}
+      onTeleportTo={(player, name) => runTeleport(player, { type: 'player', name })}
+      onPick={(player) => {
+        setPicking(player);
+        setSelecting(false);
+        setSheet(null);
+      }}
+      onRefreshOnline={() => online.refetch()}
+    />
+  );
+  const playersCount = (
+    <Badge size='sm' variant='light' color={onlineCount > 0 ? 'green' : 'gray'}>
+      {t('players.count', { online: onlineCount, known: allPlayers.length })}
+    </Badge>
+  );
+  const resetButton = overview.capabilities.reset_heatmap && (
+    <Tooltip label={t('players.resetHeatmap', {})} withinPortal>
+      <ActionIcon
+        variant='subtle'
+        color='red'
+        size={28}
+        aria-label={t('players.resetHeatmap', {})}
+        onClick={() => setConfirmReset(true)}
+      >
+        <FontAwesomeIcon icon={faTrash} size='xs' />
+      </ActionIcon>
+    </Tooltip>
+  );
+  const bottomOffset = compact ? 64 : 12;
 
   return (
     <div
       ref={container}
-      style={{
-        position: 'relative',
-        height: fullscreen ? '100vh' : 'calc(100vh - 220px)',
-        minHeight: 480,
-        borderRadius: fullscreen ? 0 : 'var(--mantine-radius-md)',
-        overflow: 'hidden',
-        background: '#101113',
-        userSelect: 'none',
-      }}
+      className='wm-map'
+      data-fullscreen={fullscreen}
+      style={fullscreen ? { position: 'fixed', inset: 0, zIndex: 150, height: '100dvh' } : { height: fillHeight }}
     >
       <MapCanvas
         server={server}
@@ -344,16 +449,31 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
         }}
         onCursor={setCursor}
         onMenu={onMenu}
+        onTap={onTap}
         onTiles={setTileStatus}
       />
+
+      {regions.data && regions.data.length === 0 && (
+        <div className='wm-empty'>
+          <div className='wm-glass'>
+            <Text size='sm' fw={600}>
+              {t('map.emptyTitle', {})}
+            </Text>
+            <Text className='wm-label' mt={4}>
+              {t('map.empty', {})}
+            </Text>
+          </div>
+        </div>
+      )}
 
       {layers.markers && mainOverworld && spawn && (
         <div
           title={t('map.spawn', {})}
           style={{
             position: 'absolute',
-            left: marker(spawn[0], spawn[2])[0] - 9,
-            top: marker(spawn[0], spawn[2])[1] - 22,
+            left: marker(spawn[0], spawn[2])[0],
+            top: marker(spawn[0], spawn[2])[1],
+            transform: 'translate(-50%, -100%)',
             color: '#facc15',
             fontSize: 22,
             pointerEvents: 'none',
@@ -374,129 +494,163 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
             <button
               key={player.uuid}
               type='button'
-              title={`${playerLabel(player)} · X ${player.x.toFixed(1)} Z ${player.z.toFixed(1)}`}
-              onClick={() => setSelectedUuid(player.uuid)}
-              style={{
-                position: 'absolute',
-                left: left - 14,
-                top: top - 38,
-                width: 28,
-                padding: 0,
-                border: 'none',
-                background: 'none',
-                cursor: 'pointer',
-                zIndex: isSelected ? 4 : 3,
-              }}
+              className='wm-marker'
+              data-selected={isSelected}
+              aria-label={playerLabel(player)}
+              onClick={() => setSelectedUuid(isSelected ? null : player.uuid)}
+              style={{ left, top, zIndex: isSelected ? 4 : 3 }}
             >
-              <img
-                src={avatarUrl(player.uuid, 48)}
-                alt={playerLabel(player)}
-                width={28}
-                height={28}
-                style={{
-                  display: 'block',
-                  borderRadius: 4,
-                  border: `2px solid ${isSelected ? '#3b82f6' : '#fff'}`,
-                  boxShadow: '0 1px 4px rgba(0,0,0,0.6)',
-                  imageRendering: 'pixelated',
-                }}
-              />
-              <div
-                style={{
-                  width: 0,
-                  height: 0,
-                  margin: '0 auto',
-                  borderLeft: '5px solid transparent',
-                  borderRight: '5px solid transparent',
-                  borderTop: `8px solid ${isSelected ? '#3b82f6' : '#fff'}`,
-                }}
-              />
+              <span style={{ position: 'relative' }}>
+                <img className='wm-marker-head' src={avatarUrl(player.uuid, 48)} alt='' />
+                {isOnline(onlineNow, player) && <span className='wm-marker-online' />}
+              </span>
+              <span className='wm-marker-pin' />
+              <span className='wm-marker-name'>{playerLabel(player)}</span>
             </button>
           );
         })}
 
-      <div style={{ position: 'absolute', top: 12, left: 12, zIndex: 5 }}>
-        <OverviewCard
-          overview={overview}
-          place={place}
-          onPlace={changePlace}
-          onJump={(x, z) => setView((current) => ({ ...current, x, z }))}
-        />
-      </div>
+      {compact ? (
+        <Group gap={8} style={{ position: 'absolute', top: 12, left: 12, right: 12, zIndex: 5 }}>
+          <button
+            type='button'
+            className='wm-glass wm-pill'
+            aria-expanded={sheet === 'world'}
+            onClick={() => setSheet(sheet === 'world' ? null : 'world')}
+          >
+            <FontAwesomeIcon icon={faEarthEurope} />
+            {dimensionLabel(t, place.dimension)}
+          </button>
+          <button
+            type='button'
+            className='wm-glass wm-pill'
+            aria-expanded={sheet === 'players'}
+            onClick={() => setSheet(sheet === 'players' ? null : 'players')}
+          >
+            <FontAwesomeIcon icon={faUsers} />
+            {selected ? playerLabel(selected) : t('players.short', {})}
+            {onlineCount > 0 && (
+              <Badge size='xs' color='green' variant='filled' circle>
+                {onlineCount}
+              </Badge>
+            )}
+          </button>
+        </Group>
+      ) : (
+        <>
+          <div style={{ position: 'absolute', top: 12, left: 12, zIndex: 5 }}>
+            <FloatingPanel
+              icon={<FontAwesomeIcon icon={faEarthEurope} />}
+              title={t('overview.title', {})}
+              collapseLabel={t('overview.collapse', {})}
+              actions={
+                <Badge size='sm' variant='light'>
+                  {t('overview.badge', {})}
+                </Badge>
+              }
+            >
+              {overviewContent}
+            </FloatingPanel>
+          </div>
+          <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 5 }}>
+            <FloatingPanel
+              icon={<FontAwesomeIcon icon={faUsers} />}
+              title={t('players.title', {})}
+              collapseLabel={t('players.collapse', {})}
+              actions={resetButton}
+            >
+              <Stack gap='sm'>
+                <Group>{playersCount}</Group>
+                {playersContent}
+              </Stack>
+            </FloatingPanel>
+          </div>
+        </>
+      )}
 
-      <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 5 }}>
-        <PlayerCard
-          players={allPlayers}
-          selected={selected}
-          onSelect={setSelectedUuid}
-          online={online.data?.online ?? null}
-          onlineError={online.error ? httpErrorToHuman(online.error) : null}
-          running={running}
-          canTeleport={overview.capabilities.teleport}
-          canResetHeatmap={overview.capabilities.reset_heatmap}
-          onLocate={locate}
-          onTeleportTo={(player, name) => runTeleport(player, { type: 'player', name })}
-          onPick={(player) => {
-            setPicking(player);
-            setSelecting(false);
-          }}
-          onRefreshOnline={() => online.refetch()}
-          onResetHeatmap={() => setConfirmReset(true)}
-        />
-      </div>
+      <Drawer
+        opened={compact && sheet !== null}
+        onClose={() => setSheet(null)}
+        position='bottom'
+        radius='lg'
+        styles={{ content: { height: 'auto', maxHeight: '85dvh', flex: 'none' } }}
+        title={
+          <Group gap={8} wrap='nowrap'>
+            <FontAwesomeIcon icon={sheet === 'players' ? faUsers : faEarthEurope} />
+            <Text fw={600}>{sheet === 'players' ? t('players.title', {}) : t('overview.title', {})}</Text>
+          </Group>
+        }
+        overlayProps={{ backgroundOpacity: 0.25, blur: 2 }}
+      >
+        <Stack gap='sm' pb='md'>
+          {sheet === 'players' && (
+            <Group justify='space-between'>
+              {playersCount}
+              {resetButton}
+            </Group>
+          )}
+          {sheet === 'players' ? playersContent : overviewContent}
+        </Stack>
+      </Drawer>
 
-      <div style={{ position: 'absolute', bottom: 12, left: 12, zIndex: 5 }}>
+      <div
+        style={{
+          position: 'absolute',
+          bottom: bottomOffset,
+          left: 12,
+          zIndex: 5,
+          maxWidth: compact ? 'calc(100% - 24px)' : 360,
+        }}
+      >
         <Stack gap={6} align='flex-start'>
-          {layers.heatmap && (
-            <Paper withBorder radius='md' px='sm' py={6} style={CARD_STYLE}>
-              <Text size='xs'>
-                {!overview.heatmap.enabled
-                  ? t('heatmap.disabled', {})
-                  : heat.data && heat.data.max === 0
-                    ? t('heatmap.empty', {})
-                    : t('heatmap.legend', { days: heat.data?.days ?? overview.heatmap.retention_days })}
-              </Text>
+          {notices.map((notice) => (
+            <div key={notice} className='wm-glass' style={{ padding: '4px 10px' }}>
+              <Text size='xs'>{notice}</Text>
+            </div>
+          ))}
+          {layers.heatmap && heat.data && heat.data.max > 0 && (
+            <div className='wm-glass' style={{ padding: '6px 10px', width: 190 }}>
+              <Text className='wm-label'>{t('heatmap.legend', { days: heat.data.days })}</Text>
               <div
                 style={{
-                  marginTop: 4,
-                  height: 6,
-                  width: 180,
+                  marginTop: 5,
+                  height: 5,
                   borderRadius: 3,
                   background: 'linear-gradient(90deg, #285aff, #28dc78, #fadc28, #f03228)',
                 }}
               />
-            </Paper>
+            </div>
           )}
-          {notices.map((notice) => (
-            <Paper key={notice} withBorder radius='md' px='sm' py={4} style={CARD_STYLE}>
-              <Text size='xs'>{notice}</Text>
-            </Paper>
-          ))}
-          <Paper withBorder radius='md' px='sm' py={6} style={{ ...CARD_STYLE, minWidth: 180 }}>
-            <Text size='xs' fw={600}>
-              {t('cursor.title', {})}
-            </Text>
+          <div className='wm-glass' style={{ padding: '6px 10px', minWidth: 172 }}>
+            <Text className='wm-label'>{compact ? t('cursor.tapTitle', {}) : t('cursor.title', {})}</Text>
             {cursor ? (
               <>
-                <Text size='xs' ff='monospace'>
+                <div className='wm-mono'>
                   X {Math.floor(cursor[0])} · Z {Math.floor(cursor[1])}
-                </Text>
-                <Text size='xs' c='dimmed' ff='monospace'>
+                </div>
+                <div className='wm-mono' style={{ color: 'var(--mantine-color-dimmed)', fontSize: 11 }}>
                   {t('cursor.chunk', { x: chunkOf(cursor[0]), z: chunkOf(cursor[1]) })} ·{' '}
                   {t('cursor.region', { x: regionOf(cursor[0]), z: regionOf(cursor[1]) })}
-                </Text>
+                </div>
               </>
             ) : (
-              <Text size='xs' c='dimmed' ff='monospace'>
-                –
+              <Text size='xs' c='dimmed'>
+                {compact ? t('cursor.tapHint', {}) : '-'}
               </Text>
             )}
-          </Paper>
+          </div>
         </Stack>
       </div>
 
-      <div style={{ position: 'absolute', bottom: 12, right: 12, zIndex: 5 }}>
+      <div
+        style={
+          compact
+            ? { position: 'absolute', bottom: 12, left: '50%', transform: 'translateX(-50%)', zIndex: 5 }
+            : { position: 'absolute', bottom: 12, right: 12, zIndex: 5 }
+        }
+      >
         <Toolbar
+          compact={compact}
           layers={layers}
           onLayer={(layer) => setLayers((current) => ({ ...current, [layer]: !current[layer] }))}
           selecting={selecting}
@@ -513,53 +667,59 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
               spawn ? spawn[2] : 0,
             )
           }
-          onHelp={() => setHelp(true)}
+          heatmapDays={overview.heatmap.retention_days}
         />
       </div>
 
       {(selecting || picking) && (
         <div
-          style={{
-            position: 'absolute',
-            bottom: 72,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            width: 'max-content',
-            maxWidth: '95%',
-            zIndex: 5,
-          }}
+          style={
+            compact
+              ? { position: 'absolute', top: 64, left: 12, right: 12, zIndex: 5 }
+              : {
+                  position: 'absolute',
+                  bottom: 68,
+                  left: '50%',
+                  transform: 'translateX(-50%)',
+                  width: 'max-content',
+                  maxWidth: '95%',
+                  zIndex: 5,
+                }
+          }
         >
-          <Paper withBorder radius='md' px='sm' py={8} style={CARD_STYLE}>
+          <div className='wm-glass' style={{ padding: '8px 12px' }}>
             {picking ? (
               <Text size='sm'>{t('players.teleportHint', { name: playerLabel(picking) })}</Text>
             ) : selection.length === 0 ? (
-              <Text size='sm'>{t('selection.hint', {})}</Text>
+              <Text size='sm'>{compact ? t('selection.hintTouch', {}) : t('selection.hint', {})}</Text>
             ) : (
-              <Group gap='sm' wrap='nowrap'>
-                <Text size='sm' fw={500}>
+              <Group gap='sm'>
+                <Text size='sm' fw={600}>
                   {t('selection.count', { count: chunkCount })}
                 </Text>
-                <Button
-                  size='xs'
-                  variant='default'
-                  leftSection={<FontAwesomeIcon icon={faCopy} />}
-                  onClick={() => copy(selectionText(selection))}
-                >
-                  {t('selection.copy', {})}
-                </Button>
-                {overview.capabilities.delete_chunks && (
+                <Group gap={6}>
                   <Button
                     size='xs'
-                    color='red'
-                    disabled={power !== 'offline' || tooManyChunks}
-                    onClick={() => setConfirmDelete(true)}
+                    variant='default'
+                    leftSection={<FontAwesomeIcon icon={faCopy} />}
+                    onClick={() => copy(selectionText(selection))}
                   >
-                    {t('selection.delete', {})}
+                    {t('selection.copy', {})}
                   </Button>
-                )}
-                <Button size='xs' variant='subtle' onClick={() => setSelection([])}>
-                  {t('selection.clear', {})}
-                </Button>
+                  {overview.capabilities.delete_chunks && (
+                    <Button
+                      size='xs'
+                      color='red'
+                      disabled={power !== 'offline' || tooManyChunks}
+                      onClick={() => setConfirmDelete(true)}
+                    >
+                      {t('selection.delete', {})}
+                    </Button>
+                  )}
+                  <Button size='xs' variant='subtle' onClick={() => setSelection([])}>
+                    {t('selection.clear', {})}
+                  </Button>
+                </Group>
                 {overview.capabilities.delete_chunks && (power !== 'offline' || tooManyChunks) && (
                   <Text size='xs' c='dimmed'>
                     {power !== 'offline'
@@ -569,22 +729,31 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
                 )}
               </Group>
             )}
-          </Paper>
+          </div>
         </div>
       )}
 
       {menu && (
         <>
           <div style={{ position: 'absolute', inset: 0, zIndex: 6 }} onPointerDown={() => setMenu(null)} />
-          <Paper
-            withBorder
-            radius='md'
-            p={4}
-            style={{ ...CARD_STYLE, position: 'absolute', left: menu.left, top: menu.top, zIndex: 7 }}
+          <div
+            className='wm-glass'
+            style={
+              compact
+                ? { position: 'absolute', left: 12, right: 12, bottom: 124, zIndex: 7, padding: 4 }
+                : {
+                    position: 'absolute',
+                    left: Math.max(8, Math.min(menu.left, size.width - 300)),
+                    top: Math.max(8, Math.min(menu.top, size.height - 110)),
+                    zIndex: 7,
+                    padding: 4,
+                    width: 'max-content',
+                  }
+            }
           >
             <Stack gap={2}>
               <Button
-                size='xs'
+                size='sm'
                 variant='subtle'
                 justify='flex-start'
                 leftSection={<FontAwesomeIcon icon={faCopy} />}
@@ -597,7 +766,7 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
               </Button>
               {overview.capabilities.teleport && selected?.name && running && (
                 <Button
-                  size='xs'
+                  size='sm'
                   variant='subtle'
                   justify='flex-start'
                   leftSection={<FontAwesomeIcon icon={faLocationArrow} />}
@@ -610,7 +779,7 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
                 </Button>
               )}
             </Stack>
-          </Paper>
+          </div>
         </>
       )}
 
@@ -638,16 +807,6 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
       >
         <Text size='sm'>{t('players.resetHeatmapContent', {})}</Text>
       </ConfirmationModal>
-
-      <Modal opened={help} onClose={() => setHelp(false)} title={t('help.title', {})}>
-        <Stack gap='xs'>
-          {(['move', 'layers', 'entities', 'heatmap', 'select', 'menu', 'data'] as const).map((key) => (
-            <Text key={key} size='sm'>
-              {t(`help.${key}`, {})}
-            </Text>
-          ))}
-        </Stack>
-      </Modal>
     </div>
   );
 }

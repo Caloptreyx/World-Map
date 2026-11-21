@@ -6,12 +6,16 @@ import {
   CHUNK_BLOCKS,
   type ChunkRect,
   type Cluster,
+  chunkOf,
   chunkRect,
   cluster,
+  clusterCell,
   heatColour,
   MAX_TILE_REQUESTS,
+  pinchView,
   REGION_BLOCKS,
   type Size,
+  toggleChunk,
   toScreen,
   toWorld,
   type View,
@@ -41,9 +45,14 @@ type Tile = { state: 'loading' } | { state: 'ready'; bitmap: ImageBitmap } | { s
 const PARALLEL_TILES = 4;
 /** Tiles kept in memory beyond the ones on screen. */
 const KEPT_TILES = 300;
-const CLUSTER_CELL = 28;
 const ICON_SIZE = 20;
 const DRAG_THRESHOLD = 4;
+/** Finger movement still counted as a tap. */
+const TOUCH_SLOP = 10;
+const LONG_PRESS_MS = 450;
+
+/** Radius of the disc behind an entity group: grows slowly with its size. */
+const groupRadius = (count: number) => (count > 1 ? 13 + Math.min(7, Math.log2(count) * 2) : ICON_SIZE / 2);
 
 const icons = new Map<string, HTMLImageElement | 'failed'>();
 
@@ -64,6 +73,8 @@ interface Props {
   onPick: (x: number, z: number) => void;
   onCursor: (point: [number, number] | null) => void;
   onMenu: (x: number, z: number, clientX: number, clientY: number) => void;
+  /** A tap on a touch screen (outside selection and picking): the touch stand-in for the cursor and menu. */
+  onTap: (x: number, z: number, clientX: number, clientY: number) => void;
   onTiles: (status: TileStatus) => void;
 }
 
@@ -75,6 +86,7 @@ interface Drag {
   mode: 'pan' | 'select';
   moved: boolean;
   additive: boolean;
+  touch: boolean;
 }
 
 export default function MapCanvas(props: Props) {
@@ -84,11 +96,15 @@ export default function MapCanvas(props: Props) {
   const inFlight = useRef(0);
   const aborter = useRef(new AbortController());
   const drag = useRef<Drag | null>(null);
+  const pointers = useRef(new Map<number, [number, number]>());
+  const pinch = useRef<{ view: View; from: [[number, number], [number, number]] } | null>(null);
+  const press = useRef<number | null>(null);
   const latest = useRef(props);
   latest.current = props;
   const [version, setVersion] = useState(0);
   const [preview, setPreview] = useState<ChunkRect | null>(null);
   const [hovered, setHovered] = useState<Cluster<Entity> | null>(null);
+  const [pulse, setPulse] = useState(0);
 
   const byPosition = useMemo(() => new Map(regions.map((region) => [`${region.x},${region.z}`, region])), [regions]);
   const tileKey = (region: RegionFile) =>
@@ -173,7 +189,7 @@ export default function MapCanvas(props: Props) {
 
   const clusters = useMemo(() => {
     const shown = entities.filter((entity) => layers[entityLayer(entity.id)]);
-    return cluster(shown, view, size, CLUSTER_CELL);
+    return cluster(shown, view, size, clusterCell(view.zoom));
   }, [entities, layers.mobs, layers.entities, view, size]);
 
   // draw
@@ -187,12 +203,14 @@ export default function MapCanvas(props: Props) {
     }
     const ctx = element.getContext('2d');
     if (!ctx) return;
+    let pulseTimer: number | undefined;
     const frame = requestAnimationFrame(() => {
       ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
       ctx.clearRect(0, 0, size.width, size.height);
       ctx.imageSmoothingEnabled = view.zoom < 1;
 
       const regionSize = REGION_BLOCKS * view.zoom;
+      let pending = false;
       for (const [x, z] of visibleRegions(view, size)) {
         const region = byPosition.get(`${x},${z}`);
         if (!region) continue;
@@ -200,8 +218,26 @@ export default function MapCanvas(props: Props) {
         const tile = tiles.current.get(tileKey(region));
         if (tile?.state === 'ready') {
           ctx.drawImage(tile.bitmap, sx, sy, regionSize, regionSize);
+        } else if (tile?.state === 'error') {
+          ctx.fillStyle = 'rgba(239, 68, 68, 0.1)';
+          ctx.fillRect(sx + 1, sy + 1, regionSize - 2, regionSize - 2);
+          ctx.strokeStyle = 'rgba(239, 68, 68, 0.5)';
+          ctx.setLineDash([6, 6]);
+          ctx.strokeRect(sx + 1.5, sy + 1.5, regionSize - 3, regionSize - 3);
+          ctx.setLineDash([]);
+          if (regionSize >= 48) {
+            ctx.fillStyle = 'rgba(239, 68, 68, 0.85)';
+            ctx.font = '600 18px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('!', sx + regionSize / 2, sy + regionSize / 2);
+            ctx.textAlign = 'start';
+          }
         } else {
-          ctx.fillStyle = tile?.state === 'error' ? 'rgba(239, 68, 68, 0.12)' : 'rgba(255, 255, 255, 0.04)';
+          // a soft pulse while the region renders (redrawn through `pulse`)
+          pending = true;
+          const glow = 0.05 + 0.035 * Math.sin(Date.now() / 260);
+          ctx.fillStyle = `rgba(255, 255, 255, ${glow.toFixed(3)})`;
           ctx.fillRect(sx + 1, sy + 1, regionSize - 2, regionSize - 2);
         }
       }
@@ -251,10 +287,10 @@ export default function MapCanvas(props: Props) {
       if (preview) drawRect(preview, 'rgba(59, 130, 246, 0.2)', 'rgba(59, 130, 246, 0.9)');
 
       for (const group of clusters) {
-        const first = group.members[0];
-        const url = entityIcon(first.id);
+        const count = group.members.length;
+        const id = mostCommon(group.members);
+        const url = entityIcon(id);
         const icon = url ? icons.get(url) : 'failed';
-        const half = ICON_SIZE / 2;
         if (url && icon === undefined) {
           const image = new Image();
           icons.set(url, image);
@@ -265,34 +301,53 @@ export default function MapCanvas(props: Props) {
           };
           image.src = url;
         }
+        const radius = groupRadius(count);
+        if (count > 1) {
+          ctx.beginPath();
+          ctx.arc(group.sx, group.sy, radius, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(17, 20, 26, 0.72)';
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.28)';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+        const size = count > 1 ? 16 : ICON_SIZE;
         if (icon instanceof HTMLImageElement && icon.complete && icon.naturalWidth > 0) {
-          ctx.drawImage(icon, group.sx - half, group.sy - half, ICON_SIZE, ICON_SIZE);
+          ctx.drawImage(icon, group.sx - size / 2, group.sy - size / 2, size, size);
         } else {
           ctx.beginPath();
           ctx.arc(group.sx, group.sy, 5, 0, Math.PI * 2);
           ctx.fillStyle =
-            entityLayer(first.id) === 'entities' ? '#a1a1aa' : mobKind(first.id) === 'hostile' ? '#ef4444' : '#22c55e';
+            entityLayer(id) === 'entities' ? '#a1a1aa' : mobKind(id) === 'hostile' ? '#ef4444' : '#22c55e';
           ctx.fill();
           ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
           ctx.lineWidth = 1;
           ctx.stroke();
         }
-        if (group.members.length > 1) {
-          const label = String(group.members.length);
+        if (count > 1) {
+          const label = count > 999 ? '999+' : String(count);
           ctx.font = '600 10px sans-serif';
-          const width = Math.max(14, ctx.measureText(label).width + 6);
-          ctx.fillStyle = 'rgba(17, 24, 39, 0.9)';
+          const width = Math.max(16, ctx.measureText(label).width + 8);
+          const left = group.sx + radius * 0.7 - width / 2;
+          const top = group.sy + radius * 0.7 - 8;
+          ctx.fillStyle = '#f8fafc';
           ctx.beginPath();
-          ctx.roundRect(group.sx + half - 6, group.sy - half - 6, width, 14, 7);
+          ctx.roundRect(left, top, width, 16, 8);
           ctx.fill();
-          ctx.fillStyle = '#fff';
+          ctx.fillStyle = '#111418';
+          ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-          ctx.fillText(label, group.sx + half - 3, group.sy - half + 1);
+          ctx.fillText(label, left + width / 2, top + 8.5);
+          ctx.textAlign = 'start';
         }
       }
+      if (pending) pulseTimer = window.setTimeout(() => setPulse((p) => p + 1), 120);
     });
-    return () => cancelAnimationFrame(frame);
-  }, [view, size, version, byPosition, layers.heatmap, heat, selection, preview, clusters, props.selecting]);
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(pulseTimer);
+    };
+  }, [view, size, version, pulse, byPosition, layers.heatmap, heat, selection, preview, clusters, props.selecting]);
 
   // the wheel zooms around the cursor (a passive React listener could not stop the page from scrolling)
   useEffect(() => {
@@ -321,33 +376,78 @@ export default function MapCanvas(props: Props) {
     return [event.clientX - rect.left, event.clientY - rect.top];
   };
 
+  const cancelPress = () => {
+    if (press.current !== null) {
+      clearTimeout(press.current);
+      press.current = null;
+    }
+  };
+
   const onPointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    const touch = event.pointerType !== 'mouse';
     // the middle button always pans, so the map can move while selecting chunks
-    if (event.button !== 0 && event.button !== 1) return;
+    if (!touch && event.button !== 0 && event.button !== 1) return;
     const [sx, sy] = local(event);
     event.currentTarget.setPointerCapture(event.pointerId);
+    pointers.current.set(event.pointerId, [sx, sy]);
+    if (pointers.current.size === 2) {
+      // a second finger: pinch instead of whatever the first one started
+      cancelPress();
+      drag.current = null;
+      setPreview(null);
+      const [a, b] = [...pointers.current.values()];
+      pinch.current = { view, from: [a, b] };
+      return;
+    }
+    if (pointers.current.size > 2) return;
     drag.current = {
       pointer: event.pointerId,
       startX: sx,
       startY: sy,
       view,
-      mode: props.selecting && event.button === 0 ? 'select' : 'pan',
+      mode: props.selecting && !touch && event.button === 0 ? 'select' : 'pan',
       moved: false,
-      additive: event.shiftKey,
+      additive: event.shiftKey || touch,
+      touch,
     };
+    if (touch && props.selecting) {
+      // touch: a long press starts a rectangle, a plain drag still pans
+      press.current = window.setTimeout(() => {
+        press.current = null;
+        const current = drag.current;
+        if (!current || current.moved) return;
+        current.mode = 'select';
+        const [x, z] = toWorld(current.view, latest.current.size, current.startX, current.startY);
+        setPreview(chunkRect(x, z, x, z));
+        navigator.vibrate?.(12);
+      }, LONG_PRESS_MS);
+    }
   };
 
   const onPointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     const [sx, sy] = local(event);
-    const [wx, wz] = toWorld(view, size, sx, sy);
-    props.onCursor([wx, wz]);
-    const current = drag.current;
-    if (!current || current.pointer !== event.pointerId) {
-      const near = clusters.find((group) => Math.hypot(group.sx - sx, group.sy - sy) <= ICON_SIZE / 2 + 2);
-      setHovered(near ?? null);
+    if (pointers.current.has(event.pointerId)) pointers.current.set(event.pointerId, [sx, sy]);
+    if (pinch.current) {
+      if (pointers.current.size === 2) {
+        const [a, b] = [...pointers.current.values()];
+        props.onView(pinchView(pinch.current.view, size, pinch.current.from, [a, b]));
+      }
       return;
     }
-    if (Math.hypot(sx - current.startX, sy - current.startY) > DRAG_THRESHOLD) current.moved = true;
+    const [wx, wz] = toWorld(view, size, sx, sy);
+    const current = drag.current;
+    if (event.pointerType === 'mouse') {
+      props.onCursor([wx, wz]);
+      if (!current) {
+        const reach = groupRadius(1) + 4;
+        setHovered(clusters.find((group) => Math.hypot(group.sx - sx, group.sy - sy) <= reach) ?? null);
+      }
+    }
+    if (!current || current.pointer !== event.pointerId) return;
+    if (Math.hypot(sx - current.startX, sy - current.startY) > (current.touch ? TOUCH_SLOP : DRAG_THRESHOLD)) {
+      current.moved = true;
+      if (current.mode === 'pan') cancelPress();
+    }
     if (!current.moved) return;
     if (current.mode === 'pan') {
       props.onView({
@@ -362,18 +462,31 @@ export default function MapCanvas(props: Props) {
   };
 
   const onPointerUp = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    pointers.current.delete(event.pointerId);
+    cancelPress();
+    if (pinch.current) {
+      // the fingers left after a pinch do nothing until all are lifted
+      if (pointers.current.size === 0) pinch.current = null;
+      return;
+    }
     const current = drag.current;
     if (!current || current.pointer !== event.pointerId) return;
     drag.current = null;
     const [sx, sy] = local(event);
     const [wx, wz] = toWorld(view, size, sx, sy);
     if (current.mode === 'select') {
-      const [x1, z1] = current.moved ? toWorld(view, size, current.startX, current.startY) : [wx, wz];
-      const rect = chunkRect(x1, z1, wx, wz);
       setPreview(null);
-      props.onSelection(current.additive ? [...selection, rect] : [rect]);
-    } else if (!current.moved && props.picking) {
-      props.onPick(wx, wz);
+      if (current.moved || current.touch) {
+        const [x1, z1] = toWorld(view, size, current.startX, current.startY);
+        const rect = chunkRect(x1, z1, wx, wz);
+        props.onSelection(current.additive ? [...selection, rect] : [rect]);
+      } else {
+        props.onSelection(toggleChunk(selection, chunkOf(wx), chunkOf(wz)));
+      }
+    } else if (!current.moved) {
+      if (props.picking) props.onPick(wx, wz);
+      else if (props.selecting) props.onSelection(toggleChunk(selection, chunkOf(wx), chunkOf(wz)));
+      else if (current.touch) props.onTap(wx, wz, event.clientX, event.clientY);
     }
   };
 
@@ -392,11 +505,16 @@ export default function MapCanvas(props: Props) {
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onPointerCancel={() => {
+        onPointerCancel={(event) => {
+          pointers.current.delete(event.pointerId);
+          if (pointers.current.size === 0) pinch.current = null;
+          cancelPress();
           drag.current = null;
           setPreview(null);
         }}
-        onPointerLeave={() => {
+        onPointerLeave={(event) => {
+          // touch pointers leave after every tap: the tapped position stays in the readout
+          if (event.pointerType !== 'mouse') return;
           props.onCursor(null);
           setHovered(null);
         }}
@@ -406,27 +524,15 @@ export default function MapCanvas(props: Props) {
         }}
         onContextMenu={(event) => {
           event.preventDefault();
+          // touch screens send this for a long press; taps open the readout there instead
+          if ((event.nativeEvent as PointerEvent).pointerType === 'touch') return;
           const [sx, sy] = local(event);
           const [wx, wz] = toWorld(view, size, sx, sy);
           props.onMenu(wx, wz, event.clientX, event.clientY);
         }}
       />
       {hovered && (
-        <div
-          style={{
-            position: 'absolute',
-            left: hovered.sx + 14,
-            top: hovered.sy + 14,
-            pointerEvents: 'none',
-            background: 'rgba(17, 24, 39, 0.92)',
-            color: '#fff',
-            borderRadius: 6,
-            padding: '4px 8px',
-            fontSize: 12,
-            maxWidth: 260,
-            zIndex: 3,
-          }}
-        >
+        <div className='wm-glass wm-tooltip' style={{ left: hovered.sx + 16, top: hovered.sy + 16 }}>
           {summarize(hovered.members).map(([label, count]) => (
             <div key={label}>
               {count > 1 ? `${count} × ` : ''}
@@ -447,4 +553,16 @@ function summarize(members: Entity[]): [string, number][] {
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
   return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+}
+
+/** The entity id a group shows: the most frequent one. */
+function mostCommon(members: Entity[]): string {
+  const counts = new Map<string, number>();
+  let best = members[0].id;
+  for (const entity of members) {
+    const count = (counts.get(entity.id) ?? 0) + 1;
+    counts.set(entity.id, count);
+    if (count > (counts.get(best) ?? 0)) best = entity.id;
+  }
+  return best;
 }

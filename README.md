@@ -9,22 +9,26 @@ Package name: `dev.caloptreyx.worldmap` · Requires panel `>=1.2.10`
 ## Features
 
 - **2D map** of every world and dimension, block colours tinted by biome (grass, foliage, water)
-  and shaded by slope, like a vanilla map item. Pan by dragging, zoom with the wheel or a
-  double-click, fullscreen.
-- **World Overview** card: spawn coordinates, the version that last saved the world, jump to
-  coordinates, world and dimension selects (Overworld, Nether, End and datapack dimensions).
-- **Player Selection** card: every player who has joined (skin head, name), their last saved
-  position, locate on the map, and for operators teleport to another player or to a spot picked
-  on the map.
-- **Layers** (toolbar, bottom right): players, spawn marker, player heatmap, mobs (spawn egg
-  icons, grouped with a count when close together) and other entities (vehicles, items, armor
-  stands...).
+  and shaded by slope, like a vanilla map item. Pan by dragging, zoom with the wheel, a pinch or a
+  double-click, fullscreen. The map fills the screen below the page header.
+- **World Overview** panel: dimension switch, world select, spawn coordinates, the version that
+  last saved the world, the number of region files, jump to coordinates.
+- **Player Selection** panel: every player who has joined (skin head, name, online badge), their
+  last saved position, locate on the map, and for operators teleport to another player or to a
+  spot picked on the map. Player markers show their name on hover or selection.
+- **Layers** (toolbar): players, spawn marker, player heatmap, mobs (spawn egg icons, grouped
+  into one marker with a count per area, finer as you zoom in) and other entities (vehicles,
+  items, armor stands...). The help button opens a legend.
 - **Heatmap** of where players spend their time, from position samples kept for a configurable
   number of days.
-- **Chunk tools**: select chunks (drag rectangles, Shift adds), copy their coordinates, and delete
-  them while the server is stopped so they generate again.
-- **Cursor** box with the block, chunk and region under the mouse; right-click to copy
+- **Chunk tools**: select chunks (drag rectangles, Shift adds, a click toggles one chunk), copy
+  their coordinates, and delete them while the server is stopped so they generate again.
+- **Cursor** readout with the block, chunk and region under the mouse; right-click to copy
   coordinates or teleport the selected player there.
+- **Phones and tablets** (map narrower than 900 px): the panels open as bottom sheets from two
+  buttons, the layers fold into one menu, every control is at least 40 px. Tap the map for the
+  position readout and its actions, pinch to zoom, and in chunk selection tap chunks to toggle
+  them or press and hold, then drag, to add a rectangle.
 
 ## How the data is read
 

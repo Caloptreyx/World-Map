@@ -9,5 +9,7 @@
 - Player heatmap from position samples while the server runs, with a retention setting.
 - Chunk selection with copy and delete (server stopped, with confirmation).
 - Teleport a player to another player or to a spot on the map.
+- Works on phones and tablets: bottom sheets for the panels, a layers menu, pinch zoom, tap for
+  the position readout and touch gestures for chunk selection.
 - `world-map.view`, `world-map.delete-chunks`, `world-map.teleport` and `world-map.reset-heatmap`
   server permissions; admin settings for eggs, heatmap and rendering limits.
