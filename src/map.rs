@@ -98,7 +98,7 @@ impl Layout {
                     .find(|d| d.id == dimension)
                     .or_else(|| inside.first())
                 {
-                    return Some((world, found));
+                    return Some((world, *found));
                 }
             }
         }

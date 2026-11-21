@@ -4,3 +4,5 @@ dist
 exported-extensions
 *.c7s.zip
 __pycache__
+AGENTS.md
+.agents
