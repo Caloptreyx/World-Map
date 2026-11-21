@@ -1,7 +1,8 @@
 //! What a chunk looks like from above: the topmost visible block of every column, the water
 //! above it and the biome there. Reads the 1.18+ format (`sections` with `block_states` and
-//! `biomes` palettes) and the 1.13 to 1.17 format (`Level.Sections` with `Palette` and
-//! `BlockStates`); older chunks (numeric block ids) are reported as unsupported.
+//! `biomes` palettes; since 26.x palette entries may be plain strings or `{id, properties}`)
+//! and the 1.13 to 1.17 format (`Level.Sections` with `Palette` and `BlockStates`); older
+//! chunks (numeric block ids) are reported as unsupported.
 use crate::{
     colors,
     nbt::{Compound, Tag},
@@ -165,10 +166,19 @@ fn kind(name: &str) -> Kind {
     }
 }
 
+/// The block names of a palette: `{Name, Properties}` entries before 26.x; since then plain
+/// strings or `{id, properties}`, with strings wrapped as `{"": name}` when a list mixes both.
 fn palette_names(entries: &[Tag]) -> Option<Vec<&str>> {
     entries
         .iter()
-        .map(|entry| entry.as_compound()?.str("Name"))
+        .map(|entry| match entry {
+            Tag::String(name) => Some(name.as_str()),
+            Tag::Compound(compound) => compound
+                .str("Name")
+                .or_else(|| compound.str("id"))
+                .or_else(|| compound.str("")),
+            _ => None,
+        })
         .collect()
 }
 
@@ -434,6 +444,7 @@ mod tests {
     const NETHER: &[u8] = include_bytes!("../tests/fixtures/nether.mca");
     const COMPRESSIONS: &[u8] = include_bytes!("../tests/fixtures/compressions.mca");
     const LEGACY: &[u8] = include_bytes!("../tests/fixtures/legacy.mca");
+    const V26: &[u8] = include_bytes!("../tests/fixtures/v26.mca");
     const EXPECTED: &str = include_str!("../tests/fixtures/expected.json");
 
     fn expected() -> Value {
@@ -538,6 +549,14 @@ mod tests {
         assert_eq!(legacy.names[pool.floor.unwrap() as usize], "minecraft:sand");
         let dry = legacy.columns[0].unwrap();
         assert_eq!((dry.depth, dry.floor), (0, None));
+    }
+
+    #[test]
+    fn chunks_saved_by_26_match_the_reference() {
+        let expected = expected();
+        for (index, reference) in expected["v26"].as_object().unwrap() {
+            assert_matches(parse(V26, index.parse().unwrap(), None), reference);
+        }
     }
 
     #[test]

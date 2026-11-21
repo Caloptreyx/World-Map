@@ -7,7 +7,7 @@ Older chunk formats and the rarer compressions are synthesized here, because no 
 at hand. `expected.json` holds, for every fixture chunk, the topmost block of every column as
 an independent reference implementation (this file) sees it; the Rust tests compare against it.
 
-Usage: python3 scripts/make_fixtures.py <world root with world/, world_nether/>
+Usage: python3 scripts/make_fixtures.py <world root with world/, world_nether/> [26.x region file]
 """
 
 import gzip
@@ -59,6 +59,17 @@ def unpack(longs, bits, count, spanning):
     return out
 
 
+def palette_name(entry):
+    """A palette entry: `{Name, Properties}` before 26.x; since then a plain string or
+    `{id, properties}`, strings wrapped as `{"": ...}` when the list mixes both."""
+    if entry.kind == STRING:
+        return entry.value
+    for key in ("Name", "id", ""):
+        if key in entry.value:
+            return entry.value[key].value
+    raise ValueError(f"unknown palette entry {entry.value.keys()}")
+
+
 def bits_for(n, minimum):
     bits = max(minimum, (n - 1).bit_length())
     return bits
@@ -74,7 +85,7 @@ def sections(root):
             states = s.get("block_states")
             if not states:
                 continue
-            palette = [p.value["Name"].value for p in states.value["palette"].value]
+            palette = [palette_name(p) for p in states.value["palette"].value]
             if len(palette) == 1:
                 names = [palette[0]] * 4096
             else:
@@ -87,7 +98,7 @@ def sections(root):
             s = section.value
             if "Palette" not in s:
                 continue
-            palette = [p.value["Name"].value for p in s["Palette"].value]
+            palette = [palette_name(p) for p in s["Palette"].value]
             indices = unpack(s["BlockStates"].value, bits_for(len(palette), 4), 4096, data_version < 2529)
             out.append((s["Y"].value, [palette[i] for i in indices]))
     return sorted(out, reverse=True)
@@ -255,7 +266,7 @@ def main():
     # Compressions: one recorded chunk stored as gzip (1), zlib (2), none (3) and LZ4 (4).
     index, compression, payload = chunks[52]
     raw = zlib.decompress(payload)
-    variants = [(0, 1, gzip.compress(raw)), (1, 2, zlib.compress(raw)), (2, 3, raw), (3, 4, lz4_java_block(raw))]
+    variants = [(0, 1, gzip.compress(raw, mtime=0)), (1, 2, zlib.compress(raw)), (2, 3, raw), (3, 4, lz4_java_block(raw))]
     (OUT / "compressions.mca").write_bytes(build_region(variants))
     expected["compressions"] = surface(chunk_nbt(compression, payload).value)
 
@@ -270,6 +281,16 @@ def main():
         "1.16": surface(chunk_nbt(2, legacy[0][2]).value),
         "1.13": surface(chunk_nbt(2, legacy[1][2]).value),
     }
+
+    # Chunks saved by 26.3: palettes of plain strings and mixed lists.
+    if len(sys.argv) > 2:
+        source = Path(sys.argv[2]).read_bytes()
+        chunks = {index: (index, c, p) for index, c, p in region_chunks(source)}
+        picked = [97, 207, 239]
+        (OUT / "v26.mca").write_bytes(build_region([chunks[i] for i in picked]))
+        expected["v26"] = {
+            str(i): surface(chunk_nbt(chunks[i][1], chunks[i][2]).value) for i in picked
+        }
 
     (OUT / "expected.json").write_text(json.dumps(expected, separators=(",", ":")) + "\n")
     for path in sorted(OUT.iterdir()):

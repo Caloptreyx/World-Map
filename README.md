@@ -142,8 +142,8 @@ Below `/api/client/servers/{server}/world-map`: `GET /` (worlds, spawn, capabili
 Crate at the repository root, frontend in `frontend/`, migrations in `migrations/`. CI
 (`.github/workflows/check.yml`) builds the extension inside the newest panel release: typecheck,
 oxlint/oxfmt, `pnpm build`, the node tests in `tests/` and `cargo test`. The Rust tests compare
-chunk parsing against `tests/fixtures/` (chunks cut from a real Paper 1.21.4 world, every region
-compression, synthesized 1.13/1.16 and pre-1.13 chunks, with expected surfaces computed by the
+chunk parsing against `tests/fixtures/` (chunks cut from real Paper 1.21.4 and 26.3 worlds, every
+region compression, synthesized 1.13/1.16 and pre-1.13 chunks, with expected surfaces computed by the
 independent reader in `scripts/make_fixtures.py`), and cover colour lookup, world and dimension
 detection, chunk/region math, region rewriting and the permission gating of chunk deletion and
 teleports.

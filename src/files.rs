@@ -2,7 +2,13 @@
 //! error mapping as the panel's own routes. Adapted from Caloptreyx/Player-Manager (MIT).
 use crate::tunnel::TunnelError;
 use axum::http::StatusCode;
-use shared::{ApiError, State, models::server::Server, response::ApiResponse};
+use shared::{
+    ApiError, State,
+    database::Database,
+    models::{node::Node, server::Server},
+    response::ApiResponse,
+};
+use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use wings_api::{
     client::{ApiHttpError, AsyncRequestReader, WingsClient},
@@ -18,6 +24,8 @@ fn wings_status(status: StatusCode, err: wings_api::ApiError) -> ApiResponse {
 
 pub struct Wings {
     client: WingsClient,
+    node: Node,
+    database: Arc<Database>,
     server: uuid::Uuid,
     ignored: Option<Vec<compact_str::CompactString>>,
     address: Option<(String, u16)>,
@@ -26,10 +34,8 @@ pub struct Wings {
 impl Wings {
     pub async fn connect(state: &State, server: &Server) -> Result<Self, ApiResponse> {
         let ignored = server.subuser_ignored_files.clone();
-        let client = server
-            .node
-            .fetch_cached(&state.database)
-            .await?
+        let node = server.node.fetch_cached(&state.database).await?;
+        let client = node
             .api_client(&state.database)
             .await?
             .ignoring(ignored.clone().unwrap_or_default());
@@ -44,6 +50,8 @@ impl Wings {
         });
         Ok(Self {
             client,
+            node,
+            database: state.database.clone(),
             server: server.uuid,
             ignored,
             address,
@@ -148,8 +156,19 @@ impl Wings {
         }
     }
 
+    /// The server's power state from the node's resource report, as the panel shows it (cached
+    /// by the panel for 15 seconds). Wings' single-server endpoint is not used: its payload
+    /// differs between Wings versions.
     pub async fn power_state(&self) -> Result<wings_api::ServerState, ApiResponse> {
-        Ok(self.client.get_servers_server(self.server).await?.state)
+        self.node
+            .fetch_server_resources(&self.database)
+            .await?
+            .get(&self.server)
+            .map(|usage| usage.state)
+            .ok_or_else(|| {
+                ApiResponse::error("the node did not report this server")
+                    .with_status(StatusCode::BAD_GATEWAY)
+            })
     }
 
     /// Sends console commands in one request (409 when the server is not running).

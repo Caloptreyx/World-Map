@@ -16,7 +16,7 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 /// Bumped when rendering changes, so cached tiles are drawn again.
-pub const RENDER_VERSION: u32 = 1;
+pub const RENDER_VERSION: u32 = 2;
 /// Render slots; a render takes `PERMITS / render_concurrency` of them.
 const PERMITS: u32 = 16;
 
