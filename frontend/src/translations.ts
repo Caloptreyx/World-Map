@@ -109,7 +109,7 @@ const translations = defineTranslations({
       heatmap:
         'The heatmap counts where players were each time the server saved them (every few minutes while they are online).',
       select:
-        'Chunk selection: drag a rectangle, Shift adds to it. Selected chunks can be deleted while the server is stopped.',
+        'Chunk selection: drag a rectangle, Shift adds to it, the middle mouse button still moves the map. Selected chunks can be deleted while the server is stopped.',
       data: 'Everything is read from the server files, so the map shows the world as last saved.',
       menu: 'Right-click the map to copy coordinates or teleport the selected player there.',
     },

@@ -322,7 +322,8 @@ export default function MapCanvas(props: Props) {
   };
 
   const onPointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (event.button !== 0) return;
+    // the middle button always pans, so the map can move while selecting chunks
+    if (event.button !== 0 && event.button !== 1) return;
     const [sx, sy] = local(event);
     event.currentTarget.setPointerCapture(event.pointerId);
     drag.current = {
@@ -330,7 +331,7 @@ export default function MapCanvas(props: Props) {
       startX: sx,
       startY: sy,
       view,
-      mode: props.selecting ? 'select' : 'pan',
+      mode: props.selecting && event.button === 0 ? 'select' : 'pan',
       moved: false,
       additive: event.shiftKey,
     };
