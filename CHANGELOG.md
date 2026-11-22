@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0
+## 0.1.1
 
 - Worlds with any name: the main world follows `level-name` from `server.properties` (Java
   properties escapes, spaces, paths like `worlds/survival`), with its `<level-name>_nether`,
