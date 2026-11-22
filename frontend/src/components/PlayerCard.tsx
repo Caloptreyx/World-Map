@@ -8,7 +8,8 @@ import Group from '@/elements/layout/Group.tsx';
 import Stack from '@/elements/layout/Stack.tsx';
 import Menu from '@/elements/overlays/Menu.tsx';
 import Text from '@/elements/typography/Text.tsx';
-import type { Online, Player } from '../api.ts';
+import type { Online, Player, Presence } from '../api.ts';
+import { isOnline } from '../lib/players.ts';
 import { useExtTranslations } from '../translations.ts';
 import { dimensionLabel } from './OverviewCard.tsx';
 
@@ -17,15 +18,18 @@ export const avatarUrl = (uuid: string, size: number) => `https://mc-heads.net/a
 /** A player's name, or the start of their UUID when the server never cached the name. */
 export const playerLabel = (player: Player) => player.name ?? player.uuid.slice(0, 8);
 
-export const isOnline = (online: Online | null, player: Player) =>
-  !!player.name && !!online?.players.includes(player.name);
-
 interface Props {
+  /** The players the layers show. */
   players: Player[];
+  /** Why `players` is empty. */
+  empty: string;
   selected: Player | null;
   onSelect: (uuid: string | null) => void;
   online: Online | null;
   onlineError: string | null;
+  presence: Presence | null;
+  /** The server's setting hides online players. */
+  onlineHidden: boolean;
   running: boolean;
   canTeleport: boolean;
   /** Whether the shown world and dimension can be teleported into. */
@@ -36,15 +40,39 @@ interface Props {
   onRefreshOnline: () => void;
 }
 
+/** How sure the list is about who is online, when it is not sure. */
+function PresenceNote({ presence }: { presence: Presence | null }) {
+  const { t } = useExtTranslations();
+  if (!presence) return null;
+  const text =
+    presence.state === 'not_running'
+      ? t('players.presenceStopped', {})
+      : presence.state === 'unknown'
+        ? t('players.presenceUnknown', { error: presence.error })
+        : presence.state === 'partial' && presence.count !== undefined
+          ? t('players.presencePartial', { named: presence.named ?? 0, count: presence.count })
+          : null;
+  return text ? (
+    <Text size='xs' c={presence.state === 'not_running' ? 'dimmed' : 'orange'}>
+      {text}
+    </Text>
+  ) : null;
+}
+
 /** Choosing a player, where they were last saved, and locating or teleporting them. */
 export default function PlayersContent(props: Props) {
   const { t } = useExtTranslations();
   const { players, selected, online } = props;
-  const selectedOnline = selected ? isOnline(online, selected) : false;
+  const selectedOnline = selected ? isOnline(selected, online) : false;
   const others = online?.players.filter((name) => name !== selected?.name) ?? [];
 
   if (players.length === 0) {
-    return <Text className='wm-label'>{t('players.none', {})}</Text>;
+    return (
+      <Stack gap='sm'>
+        <Text className='wm-label'>{props.empty}</Text>
+        <PresenceNote presence={props.presence} />
+      </Stack>
+    );
   }
 
   return (
@@ -68,7 +96,7 @@ export default function PlayersContent(props: Props) {
               <Text size='sm' style={{ flex: 1 }}>
                 {option.label}
               </Text>
-              {isOnline(online, player) && (
+              {isOnline(player, online) && (
                 <Badge size='xs' color='green' variant='light'>
                   {t('players.online', {})}
                 </Badge>
@@ -119,6 +147,8 @@ export default function PlayersContent(props: Props) {
                 <Menu.Dropdown>
                   {!props.running ? (
                     <Menu.Label>{t('players.teleportOffline', {})}</Menu.Label>
+                  ) : props.onlineHidden ? (
+                    <Menu.Label>{t('players.teleportHidden', {})}</Menu.Label>
                   ) : !selectedOnline ? (
                     <Menu.Label>{t('players.teleportNotOnline', { name: playerLabel(selected) })}</Menu.Label>
                   ) : (
@@ -146,6 +176,7 @@ export default function PlayersContent(props: Props) {
           </Group>
         </>
       )}
+      <PresenceNote presence={props.presence} />
       {props.onlineError && (
         <Text size='xs' c='orange'>
           {t('players.onlineUnknown', { error: props.onlineError })}

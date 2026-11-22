@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use wings_api::{
     client::{ApiHttpError, AsyncRequestReader, WingsClient},
-    tunnel::QueryStreamTunnel,
+    tunnel::{QueryStreamTunnel, QueryUdpTunnel},
 };
 
 const LIST_PER_PAGE: u64 = 200;
@@ -20,6 +20,16 @@ const LIST_MAX_PAGES: u64 = 50;
 
 fn wings_status(status: StatusCode, err: wings_api::ApiError) -> ApiResponse {
     ApiResponse::new_serialized(ApiError::new_wings_value(err)).with_status(status)
+}
+
+fn tunnel_error(err: ApiHttpError) -> TunnelError {
+    TunnelError::failed(match err {
+        ApiHttpError::Http(status, err) => {
+            format!("Wings could not open a tunnel ({status}): {}", err.error)
+        }
+        ApiHttpError::WebSocket(err) => format!("Wings could not open a tunnel: {err}"),
+        other => format!("Wings could not open a tunnel: {other:?}"),
+    })
 }
 
 pub struct Wings {
@@ -216,14 +226,14 @@ impl Wings {
         self.client
             .open_tunnel_tcp(self.server, port)
             .await
-            .map_err(|err| {
-                TunnelError::failed(match err {
-                    ApiHttpError::Http(status, err) => {
-                        format!("Wings could not open a tunnel ({status}): {}", err.error)
-                    }
-                    ApiHttpError::WebSocket(err) => format!("Wings could not open a tunnel: {err}"),
-                    other => format!("Wings could not open a tunnel: {other:?}"),
-                })
-            })
+            .map_err(tunnel_error)
+    }
+
+    /// A UDP tunnel to `port` of the server's container.
+    pub async fn udp(&self, port: u16) -> Result<QueryUdpTunnel, TunnelError> {
+        self.client
+            .open_tunnel_udp(self.server, port)
+            .await
+            .map_err(tunnel_error)
     }
 }

@@ -58,7 +58,10 @@ export interface Overview {
     teleport: boolean;
     reset_heatmap: boolean;
     manage_worlds: boolean;
+    manage_players: boolean;
   };
+  /** Which players the map shows on this server (a per-server setting). */
+  player_visibility: PlayerVisibility;
   heatmap: {
     enabled: boolean;
     interval_minutes: number;
@@ -87,14 +90,38 @@ export interface Player {
   y: number;
   z: number;
   yaw: number;
+  /** When the player file was saved, Unix seconds: the position is from then. */
   last_seen: number;
+  /** Named online right now (a player the server does not name counts as offline). */
+  online: boolean;
 }
+
+export interface PlayerVisibility {
+  online: boolean;
+  offline: boolean;
+}
+
+export type OnlineSource = 'query' | 'ping' | 'console';
+
+/** How sure the player list is about who is online. The counts are left out while the server
+ * hides online players. */
+export type Presence =
+  | { state: 'not_running' }
+  | { state: 'unknown'; error: string }
+  | {
+      state: 'known' | 'partial';
+      source: OnlineSource;
+      count?: number;
+      max?: number;
+      named?: number;
+    };
 
 export interface Online {
   count: number;
   max: number;
   players: string[];
   complete: boolean;
+  source: OnlineSource;
 }
 
 export interface Entity {
@@ -148,10 +175,12 @@ export const getTile = async (server: string, place: Place, region: RegionFile, 
     })
   ).data;
 
-export const getPlayers = async (server: string): Promise<Player[]> =>
-  (await axiosInstance.get(`${base(server)}/players`)).data.players;
+export const getPlayers = async (server: string): Promise<{ players: Player[]; presence: Presence | null }> =>
+  (await axiosInstance.get(`${base(server)}/players`)).data;
 
-export const getOnline = async (server: string): Promise<{ running: boolean; online: Online | null }> =>
+export const getOnline = async (
+  server: string,
+): Promise<{ running: boolean; online: Online | null; hidden?: boolean }> =>
   (await axiosInstance.get(`${base(server)}/online`)).data;
 
 export const getEntities = async (
@@ -176,6 +205,9 @@ export const deleteChunks = async (
 
 export const updateWorlds = async (server: string, paths: string[]): Promise<ExtraWorld[]> =>
   (await axiosInstance.put(`${base(server)}/worlds`, { extra_worlds: paths })).data.extra_worlds;
+
+export const updatePlayerVisibility = async (server: string, visibility: PlayerVisibility): Promise<PlayerVisibility> =>
+  (await axiosInstance.put(`${base(server)}/players/visibility`, visibility)).data.player_visibility;
 
 export const teleport = async (server: string, player: string, target: TeleportTarget): Promise<string> =>
   (await axiosInstance.post(`${base(server)}/teleport`, { player, target })).data.command;

@@ -14,12 +14,13 @@ Package name: `dev.caloptreyx.worldmap` · Requires panel `>=1.2.10`
 - **World Overview** panel: world select (every world found, the main one marked "(main)"),
   dimension switch, spawn coordinates and the version that last saved the selected world, the
   number of region files, jump to coordinates, and the world folder settings (gear button).
-- **Player Selection** panel: every player who has joined (skin head, name, online badge), their
-  last saved position, locate on the map, and for operators teleport to another player or to a
-  spot picked on the map. Player markers show their name on hover or selection.
-- **Layers** (toolbar): players, spawn marker, player heatmap, mobs (spawn egg icons, grouped
-  into one marker with a count per area, finer as you zoom in) and other entities (vehicles,
-  items, armor stands...). The help button opens a legend.
+- **Player Selection** panel: every player who has joined (skin head, name, online or offline),
+  their last saved position, locate on the map, and for operators teleport to another player or
+  to a spot picked on the map. Player markers show their name on hover or selection; online
+  players have a green dot, offline players are greyed out.
+- **Layers** (toolbar): online players, offline players, spawn marker, player heatmap, mobs
+  (spawn egg icons, grouped into one marker with a count per area, finer as you zoom in) and
+  other entities (vehicles, items, armor stands...). The help button opens a legend.
 - **Heatmap** of where players spend their time, from position samples kept for a configurable
   number of days.
 - **Chunk tools**: select chunks (drag rectangles, Shift adds, a click toggles one chunk), copy
@@ -57,8 +58,7 @@ exactly like the file manager:
   runs, the game saves each online player's file every 5 minutes (and on logout); each sample
   reads the player files saved since the previous sample and counts one visit for the chunk the
   player stood in. Counts are kept per chunk and day in the database for the retention period.
-- **Online players** (for teleports): the Server List Ping through the Wings tunnel; when it does
-  not name everyone, the console's answer to `list` (only for users allowed to teleport).
+- **Online players**: see [Online and offline players](#online-and-offline-players).
 
 ### Colours
 
@@ -118,6 +118,41 @@ When there is nothing to draw the page says why: no world generated yet, or `lev
 a folder that does not exist. When the main world is missing but other worlds exist, they are
 shown with a note.
 
+## Online and offline players
+
+Each player on the map is online or offline. While the server runs, the backend asks it who is
+online through the panel's Wings tunnel, without anything in the console:
+
+1. the **query port** (`enable-query=true` in `server.properties`, port `query.port`): names
+   every online player;
+2. else the **Server List Ping**: names the players in its sample, which vanilla limits to 12
+   and Paper can hide (`hide-online-players`). Sample entries are matched by UUID, so players
+   without a cached name are found too.
+
+A player the answer names is online; everyone else counts as offline. When the server is not
+running, its state is unknown, or no source answers, every player counts as offline and the
+Player Selection says so; when the ping names only some of the online players it says how many
+it could not name and suggests `enable-query=true`. The answer is fetched again with the player
+list every 30 seconds and when the server starts or stops. The teleport menu's "Check who is
+online" can also ask the console's `list` (users who may teleport and use the console, as before).
+
+Every position is the one in the player's file: the server saves online players every few minutes
+(autosave) and when they leave, so an online player's marker can be a few minutes behind. The
+extension has no live position source; reading one would mean sending a command per refresh.
+
+**Viewer toggles**: "Online players" and "Offline players" in the toolbar (the layers menu on
+phones), both on by default, filter the markers, the player select and the counts. The choice is
+remembered per server in the browser with the rest of the view.
+
+**Per-server setting**: the gear in the Player Selection header (permission
+`world-map.manage-players`) turns showing online players and/or offline players off for everyone
+who views this server's map. The backend leaves those players out of `GET /players`, not only the
+page; with online players off, `GET /online` returns no names and the counts are left out. The
+matching toolbar toggle is shown disabled with "turned off for this server". Servers default to
+both, also servers that existed before 0.1.2. With online players off, an online player the
+server does not name (ping sample cut off, no answer) counts as offline and is still drawn, at
+their last saved position; `enable-query=true` closes that gap.
+
 ## Supported versions
 
 | Saved by | Map |
@@ -141,12 +176,14 @@ The page and every endpoint check the acting user's server permissions through t
 | Teleport | `world-map.view`, `world-map.teleport`, `control.console`; server running |
 | Reset the heatmap | `world-map.view`, `world-map.reset-heatmap` |
 | Add world folders | `world-map.view`, `files.read-content`, `world-map.manage-worlds` |
+| Choose which players the map shows | `world-map.view`, `world-map.manage-players` |
 
 Server owners and admins have all of them; give the `world-map.*` permissions to subusers like any
 other permission. The console fallback for online players also needs `control.read-console`.
 Every write is logged: `server:file.write` per rewritten region file,
 `server:worldmap.delete-chunks`, `server:console.command` for teleports and `list`,
-`server:worldmap.reset-heatmap`, `server:worldmap.update-worlds`.
+`server:worldmap.reset-heatmap`, `server:worldmap.update-worlds`,
+`server:worldmap.update-player-visibility`.
 
 ## Admin settings
 
@@ -173,7 +210,8 @@ rewritten file, but **make a backup first**.
 ## Limits
 
 - The map shows the world as last saved: the server writes chunks and player files on its own
-  schedule (autosave, every 5 minutes by default), so very recent changes appear later.
+  schedule (autosave, every 5 minutes by default), so very recent changes appear later. Online
+  players are drawn where they were last saved too.
 - The sidebar entry shows on every server the user may view (the panel's route filter cannot see
   the server). Non-Minecraft servers get an explanation instead of the map; hide the entry for
   other eggs with the panel's egg configuration (sidebar routes) or limit the extension to some
@@ -187,10 +225,11 @@ rewritten file, but **make a backup first**.
 
 ## API
 
-Below `/api/client/servers/{server}/world-map`: `GET /` (worlds, spawn, capabilities),
-`GET /regions`, `GET /tile` (PNG), `GET /players`, `GET /online`, `GET /entities`,
-`GET|DELETE /heatmap`, `POST /chunks/delete`, `POST /teleport`, `PUT /worlds` (folders added by
-hand). Admin:
+Below `/api/client/servers/{server}/world-map`: `GET /` (worlds, spawn, capabilities, player
+setting), `GET /regions`, `GET /tile` (PNG), `GET /players` (positions, who is online),
+`GET /online` (names, for teleports), `GET /entities`, `GET|DELETE /heatmap`,
+`POST /chunks/delete`, `POST /teleport`, `PUT /worlds` (folders added by hand),
+`PUT /players/visibility` (`{"online": bool, "offline": bool}`). Admin:
 `GET|PUT /api/admin/extensions/dev.caloptreyx.worldmap/settings`.
 
 ## Development

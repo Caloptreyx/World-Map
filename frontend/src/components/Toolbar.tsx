@@ -9,7 +9,8 @@ import {
   faHouse,
   faLayerGroup,
   faLocationDot,
-  faUsers,
+  faUserCheck,
+  faUserClock,
   type IconDefinition,
 } from '@fortawesome/free-solid-svg-icons';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
@@ -19,14 +20,18 @@ import Stack from '@/elements/layout/Stack.tsx';
 import Popover from '@/elements/overlays/Popover.tsx';
 import Tooltip from '@/elements/overlays/Tooltip.tsx';
 import Text from '@/elements/typography/Text.tsx';
+import type { PlayerVisibility } from '../api.ts';
 import type { Layers } from './MapCanvas.tsx';
 import { useExtTranslations } from '../translations.ts';
 import HelpContent from './HelpContent.tsx';
 
 interface Props {
   compact: boolean;
+  /** The layers as drawn: a kind of player the server hides is off. */
   layers: Layers;
   onLayer: (layer: keyof Layers) => void;
+  /** Which players the server's setting lets the map show. */
+  visibility: PlayerVisibility;
   selecting: boolean;
   onSelecting: () => void;
   fullscreen: boolean;
@@ -39,12 +44,22 @@ interface ToolProps {
   label: string;
   icon: IconDefinition;
   pressed?: boolean;
+  /** Shown but unavailable; the tooltip says why. */
+  unavailable?: boolean;
   onClick?: () => void;
 }
 
 /** A 40 px round map tool; `pressed` marks layers and modes that are on. */
-const Tool = forwardRef<HTMLButtonElement, ToolProps>(({ label, icon, pressed, onClick }, ref) => (
-  <button ref={ref} type='button' className='wm-tool' aria-label={label} aria-pressed={pressed} onClick={onClick}>
+const Tool = forwardRef<HTMLButtonElement, ToolProps>(({ label, icon, pressed, unavailable, onClick }, ref) => (
+  <button
+    ref={ref}
+    type='button'
+    className='wm-tool'
+    aria-label={label}
+    aria-pressed={pressed}
+    aria-disabled={unavailable || undefined}
+    onClick={unavailable ? undefined : onClick}
+  >
     <FontAwesomeIcon icon={icon} />
   </button>
 ));
@@ -57,12 +72,15 @@ const tip = (label: string, child: ReactNode) => (
 
 export default function Toolbar(props: Props) {
   const { t } = useExtTranslations();
-  const layers: [keyof Layers, string, IconDefinition][] = [
-    ['players', t('toolbar.players', {}), faUsers],
-    ['markers', t('toolbar.markers', {}), faLocationDot],
-    ['heatmap', t('toolbar.heatmap', {}), faFire],
-    ['mobs', t('toolbar.mobs', {}), faDragon],
-    ['entities', t('toolbar.entities', {}), faCube],
+  // the reason a layer cannot be turned on, else null
+  const hidden = t('toolbar.hiddenByServer', {});
+  const layers: [keyof Layers, string, IconDefinition, string | null][] = [
+    ['onlinePlayers', t('toolbar.onlinePlayers', {}), faUserCheck, props.visibility.online ? null : hidden],
+    ['offlinePlayers', t('toolbar.offlinePlayers', {}), faUserClock, props.visibility.offline ? null : hidden],
+    ['markers', t('toolbar.markers', {}), faLocationDot, null],
+    ['heatmap', t('toolbar.heatmap', {}), faFire, null],
+    ['mobs', t('toolbar.mobs', {}), faDragon, null],
+    ['entities', t('toolbar.entities', {}), faCube, null],
   ];
   const activeLayers = layers.filter(([name]) => props.layers[name]).length;
 
@@ -95,11 +113,13 @@ export default function Toolbar(props: Props) {
               <Text size='xs' fw={600}>
                 {t('toolbar.layers', {})}
               </Text>
-              {layers.map(([name, label]) => (
+              {layers.map(([name, label, , unavailable]) => (
                 <Switch
                   key={name}
                   size='md'
                   label={label}
+                  description={unavailable ?? undefined}
+                  disabled={!!unavailable}
                   checked={props.layers[name]}
                   onChange={() => props.onLayer(name)}
                 />
@@ -108,10 +128,16 @@ export default function Toolbar(props: Props) {
           </Popover.Dropdown>
         </Popover>
       ) : (
-        layers.map(([name, label, icon]) =>
+        layers.map(([name, label, icon, unavailable]) =>
           tip(
-            label,
-            <Tool label={label} icon={icon} pressed={props.layers[name]} onClick={() => props.onLayer(name)} />,
+            unavailable ? `${label}: ${unavailable}` : label,
+            <Tool
+              label={label}
+              icon={icon}
+              pressed={props.layers[name]}
+              unavailable={!!unavailable}
+              onClick={() => props.onLayer(name)}
+            />,
           ),
         )
       )}

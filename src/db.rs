@@ -1,4 +1,6 @@
-//! The extension's tables: rendered tiles, servers whose map was opened, heatmap samples.
+//! The extension's tables: rendered tiles, servers whose map was opened (with their per-server
+//! settings), heatmap samples.
+use crate::players::Visibility;
 use chrono::{DateTime, NaiveDate, Utc};
 use shared::database::Database;
 use uuid::Uuid;
@@ -127,6 +129,40 @@ pub async fn set_extra_worlds(db: &Database, server: Uuid, paths: &[String]) -> 
     )
     .bind(server)
     .bind(paths)
+    .execute(db.write())
+    .await?;
+    Ok(())
+}
+
+/// Which players the map shows on the server; both until someone changes it.
+pub async fn player_visibility(db: &Database, server: Uuid) -> Result<Visibility, sqlx::Error> {
+    let row: Option<(bool, bool)> = sqlx::query_as(
+        "SELECT show_online_players, show_offline_players FROM dev_caloptreyx_worldmap_servers
+         WHERE server_uuid = $1",
+    )
+    .bind(server)
+    .fetch_optional(db.read())
+    .await?;
+    Ok(row
+        .map(|(online, offline)| Visibility { online, offline })
+        .unwrap_or_default())
+}
+
+pub async fn set_player_visibility(
+    db: &Database,
+    server: Uuid,
+    visibility: Visibility,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO dev_caloptreyx_worldmap_servers
+             (server_uuid, show_online_players, show_offline_players) VALUES ($1, $2, $3)
+         ON CONFLICT (server_uuid) DO UPDATE SET
+             show_online_players = EXCLUDED.show_online_players,
+             show_offline_players = EXCLUDED.show_offline_players",
+    )
+    .bind(server)
+    .bind(visibility.online)
+    .bind(visibility.offline)
     .execute(db.write())
     .await?;
     Ok(())

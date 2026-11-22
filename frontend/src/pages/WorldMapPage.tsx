@@ -1,6 +1,7 @@
 import {
   faCopy,
   faEarthEurope,
+  faGear,
   faLocationArrow,
   faLocationDot,
   faTrash,
@@ -43,7 +44,8 @@ import {
 import FloatingPanel from '../components/FloatingPanel.tsx';
 import MapCanvas, { type Layers, type TileStatus } from '../components/MapCanvas.tsx';
 import OverviewContent, { placeLabel } from '../components/OverviewCard.tsx';
-import PlayersContent, { avatarUrl, isOnline, playerLabel } from '../components/PlayerCard.tsx';
+import PlayersContent, { avatarUrl, playerLabel } from '../components/PlayerCard.tsx';
+import PlayerVisibilityModal from '../components/PlayerVisibilityModal.tsx';
 import Toolbar from '../components/Toolbar.tsx';
 import WorldsModal from '../components/WorldsModal.tsx';
 import {
@@ -58,10 +60,18 @@ import {
   visibleBounds,
   visibleRegions,
 } from '../lib/geometry.ts';
+import { effectiveLayers, isOnline, restoreLayers, shownPlayers, whyNoPlayers } from '../lib/players.ts';
 import { emptyReason, findPlace, initialPlace, showsSpawn } from '../lib/worlds.ts';
 import { useExtTranslations } from '../translations.ts';
 
-const DEFAULT_LAYERS: Layers = { players: true, markers: true, heatmap: false, mobs: true, entities: false };
+const DEFAULT_LAYERS: Layers = {
+  onlinePlayers: true,
+  offlinePlayers: true,
+  markers: true,
+  heatmap: false,
+  mobs: true,
+  entities: false,
+};
 /** Below this map width the panels become sheets and the toolbar folds its layers into a menu. */
 const COMPACT_WIDTH = 900;
 
@@ -181,7 +191,8 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
     const spawn = overview.worlds.find((world) => world.name === place.world)?.level.spawn;
     return { x: spawn ? spawn[0] : 0, z: spawn ? spawn[2] : 0, zoom: 1 };
   });
-  const [layers, setLayers] = useState<Layers>(() => ({ ...DEFAULT_LAYERS, ...saved.layers }));
+  // the viewer's choice; `drawn` below also applies the server's player setting
+  const [layers, setLayers] = useState<Layers>(() => restoreLayers(DEFAULT_LAYERS, saved.layers));
   const [selecting, setSelecting] = useState(false);
   const [selection, setSelection] = useState<ChunkRect[]>([]);
   const [cursor, setCursor] = useState<[number, number] | null>(null);
@@ -194,6 +205,7 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
   const [confirmReset, setConfirmReset] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [foldersOpen, setFoldersOpen] = useState(false);
+  const [visibilityOpen, setVisibilityOpen] = useState(false);
   const container = useRef<HTMLDivElement>(null);
   const size = useSize(container);
   const fillHeight = useFillHeight(container);
@@ -235,15 +247,18 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
     queryFn: () => getRegions(server, place),
     refetchInterval: 60_000,
   });
+  const visibility = overview.player_visibility;
   const players = useQuery({
-    queryKey: [PACKAGE, server, 'players'],
+    // refetched when the server starts or stops: who is online changes with it
+    queryKey: [PACKAGE, server, 'players', running],
     queryFn: () => getPlayers(server),
-    refetchInterval: 60_000,
+    refetchInterval: 30_000,
+    placeholderData: (previous) => previous,
   });
   const online = useQuery({
     queryKey: [PACKAGE, server, 'online'],
     queryFn: () => getOnline(server),
-    enabled: overview.capabilities.teleport && running,
+    enabled: overview.capabilities.teleport && running && visibility.online,
     staleTime: 30_000,
     retry: false,
   });
@@ -275,17 +290,22 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
     placeholderData: (previous) => previous,
   });
 
-  const allPlayers = players.data ?? [];
+  const drawn = effectiveLayers(layers, visibility);
+  const allPlayers = players.data?.players ?? [];
+  const presence = players.data?.presence ?? null;
   const onlineNow = online.data?.online ?? null;
-  const selected = allPlayers.find((player) => player.uuid === selectedUuid) ?? null;
-  const here = allPlayers.filter((player) => player.world === place.world && player.dimension === place.dimension);
+  const listed = shownPlayers(allPlayers, drawn, onlineNow);
+  const selected = listed.find((player) => player.uuid === selectedUuid) ?? null;
+  const here = listed.filter((player) => player.world === place.world && player.dimension === place.dimension);
   const current = findPlace(overview.worlds, place);
   const spawn = current?.world.level.spawn ?? null;
   const spawnHere = !!current && showsSpawn(current.world, place.dimension);
   // the server must load this world under a known key to teleport into it
   const canTeleportHere = !!current?.dimension.key;
   const chunkCount = useMemo(() => selectedChunks(selection), [selection]);
-  const onlineCount = allPlayers.filter((player) => isOnline(onlineNow, player)).length;
+  const onlineCount = allPlayers.filter((player) => isOnline(player, onlineNow)).length;
+  const offlineCount = allPlayers.length - onlineCount;
+  const noPlayers = whyNoPlayers(visibility, drawn);
 
   const goTo = (target: Place, x: number, z: number, zoom?: number) => {
     setPlace({ world: target.world, dimension: target.dimension });
@@ -408,11 +428,24 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
   );
   const playersContent = (
     <PlayersContent
-      players={allPlayers}
+      players={listed}
+      empty={
+        noPlayers === 'hidden'
+          ? t('players.emptyHidden', {})
+          : noPlayers === 'layers'
+            ? t('players.emptyLayers', {})
+            : noPlayers === 'online'
+              ? t('players.emptyOnline', {})
+              : noPlayers === 'offline'
+                ? t('players.emptyOffline', {})
+                : t('players.none', {})
+      }
       selected={selected}
       onSelect={setSelectedUuid}
       online={onlineNow}
       onlineError={online.error ? httpErrorToHuman(online.error) : null}
+      presence={presence}
+      onlineHidden={!visibility.online}
       running={running}
       canTeleport={overview.capabilities.teleport}
       canPickSpot={canTeleportHere}
@@ -423,13 +456,40 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
         setSelecting(false);
         setSheet(null);
       }}
-      onRefreshOnline={() => online.refetch()}
+      onRefreshOnline={() => {
+        online.refetch();
+        players.refetch();
+      }}
     />
   );
-  const playersCount = (
-    <Badge size='sm' variant='light' color={onlineCount > 0 ? 'green' : 'gray'}>
-      {t('players.count', { online: onlineCount, known: allPlayers.length })}
-    </Badge>
+  const playersCount = (drawn.onlinePlayers || drawn.offlinePlayers) && (
+    <Group gap={6}>
+      {drawn.onlinePlayers && (
+        <Badge size='sm' variant='light' color={onlineCount > 0 ? 'green' : 'gray'}>
+          {t('players.countOnline', { count: onlineCount })}
+        </Badge>
+      )}
+      {drawn.offlinePlayers && (
+        <Badge size='sm' variant='light' color='gray'>
+          {t('players.countOffline', { count: offlineCount })}
+        </Badge>
+      )}
+    </Group>
+  );
+  const visibilityButton = overview.capabilities.manage_players && (
+    <Tooltip label={t('players.visibility', {})} withinPortal>
+      <ActionIcon
+        variant='subtle'
+        size={28}
+        aria-label={t('players.visibility', {})}
+        onClick={() => {
+          setVisibilityOpen(true);
+          setSheet(null);
+        }}
+      >
+        <FontAwesomeIcon icon={faGear} size='xs' />
+      </ActionIcon>
+    </Tooltip>
   );
   const resetButton = overview.capabilities.reset_heatmap && (
     <Tooltip label={t('players.resetHeatmap', {})} withinPortal>
@@ -443,6 +503,12 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
         <FontAwesomeIcon icon={faTrash} size='xs' />
       </ActionIcon>
     </Tooltip>
+  );
+  const playersActions = (visibilityButton || resetButton) && (
+    <Group gap={2} wrap='nowrap'>
+      {visibilityButton}
+      {resetButton}
+    </Group>
   );
   const bottomOffset = compact ? 64 : 12;
 
@@ -509,30 +575,30 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
         </div>
       )}
 
-      {layers.players &&
-        here.map((player) => {
-          const [left, top] = marker(player.x, player.z);
-          if (left < -40 || top < -40 || left > size.width + 40 || top > size.height + 40) return null;
-          const isSelected = player.uuid === selectedUuid;
-          return (
-            <button
-              key={player.uuid}
-              type='button'
-              className='wm-marker'
-              data-selected={isSelected}
-              aria-label={playerLabel(player)}
-              onClick={() => setSelectedUuid(isSelected ? null : player.uuid)}
-              style={{ left, top, zIndex: isSelected ? 4 : 3 }}
-            >
-              <span style={{ position: 'relative' }}>
-                <img className='wm-marker-head' src={avatarUrl(player.uuid, 48)} alt='' />
-                {isOnline(onlineNow, player) && <span className='wm-marker-online' />}
-              </span>
-              <span className='wm-marker-pin' />
-              <span className='wm-marker-name'>{playerLabel(player)}</span>
-            </button>
-          );
-        })}
+      {here.map((player) => {
+        const [left, top] = marker(player.x, player.z);
+        if (left < -40 || top < -40 || left > size.width + 40 || top > size.height + 40) return null;
+        const isSelected = player.uuid === selectedUuid;
+        return (
+          <button
+            key={player.uuid}
+            type='button'
+            className='wm-marker'
+            data-selected={isSelected}
+            data-online={isOnline(player, onlineNow)}
+            aria-label={`${playerLabel(player)} (${isOnline(player, onlineNow) ? t('players.online', {}) : t('players.offline', {})})`}
+            onClick={() => setSelectedUuid(isSelected ? null : player.uuid)}
+            style={{ left, top, zIndex: isSelected ? 4 : 3 }}
+          >
+            <span style={{ position: 'relative' }}>
+              <img className='wm-marker-head' src={avatarUrl(player.uuid, 48)} alt='' />
+              {isOnline(player, onlineNow) && <span className='wm-marker-online' />}
+            </span>
+            <span className='wm-marker-pin' />
+            <span className='wm-marker-name'>{playerLabel(player)}</span>
+          </button>
+        );
+      })}
 
       {compact ? (
         <Group gap={8} style={{ position: 'absolute', top: 12, left: 12, right: 12, zIndex: 5 }}>
@@ -553,7 +619,7 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
           >
             <FontAwesomeIcon icon={faUsers} />
             {selected ? playerLabel(selected) : t('players.short', {})}
-            {onlineCount > 0 && (
+            {drawn.onlinePlayers && onlineCount > 0 && (
               <Badge size='xs' color='green' variant='filled' circle>
                 {onlineCount}
               </Badge>
@@ -581,10 +647,10 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
               icon={<FontAwesomeIcon icon={faUsers} />}
               title={t('players.title', {})}
               collapseLabel={t('players.collapse', {})}
-              actions={resetButton}
+              actions={playersActions}
             >
               <Stack gap='sm'>
-                <Group>{playersCount}</Group>
+                {playersCount}
                 {playersContent}
               </Stack>
             </FloatingPanel>
@@ -610,7 +676,7 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
           {sheet === 'players' && (
             <Group justify='space-between'>
               {playersCount}
-              {resetButton}
+              {playersActions}
             </Group>
           )}
           {sheet === 'players' ? playersContent : overviewContent}
@@ -675,8 +741,9 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
       >
         <Toolbar
           compact={compact}
-          layers={layers}
+          layers={drawn}
           onLayer={(layer) => setLayers((current) => ({ ...current, [layer]: !current[layer] }))}
+          visibility={visibility}
           selecting={selecting}
           onSelecting={() => {
             setSelecting((current) => !current);
@@ -838,6 +905,15 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
           overview={overview}
           opened={foldersOpen}
           onClose={() => setFoldersOpen(false)}
+        />
+      )}
+      {overview.capabilities.manage_players && (
+        <PlayerVisibilityModal
+          key={String(visibilityOpen)}
+          server={server}
+          visibility={visibility}
+          opened={visibilityOpen}
+          onClose={() => setVisibilityOpen(false)}
         />
       )}
     </div>

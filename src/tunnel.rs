@@ -22,6 +22,12 @@ impl TunnelError {
         Self::Failed(message.into())
     }
 
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Failed(message) | Self::NoAnswer(message) => message,
+        }
+    }
+
     pub fn response(self) -> ApiResponse {
         match self {
             Self::Failed(message) => {

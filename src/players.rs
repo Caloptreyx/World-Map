@@ -1,7 +1,9 @@
 //! Players' last known positions: `<uuid>.dat` files in the world's player folder (gzipped NBT
-//! with `Pos`, `Rotation` and `Dimension`), named through `usercache.json`.
+//! with `Pos`, `Rotation` and `Dimension`), named through `usercache.json`, and which of them
+//! the map shows.
 use crate::{
     nbt::{self, Compound, Tag},
+    online::Presence,
     worlds,
 };
 use serde::{Deserialize, Serialize};
@@ -89,6 +91,57 @@ pub fn valid_name(name: &str) -> bool {
         && plain
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+/// Which players the map shows on a server, set per server. Both by default, also for servers
+/// that never saved it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Visibility {
+    pub online: bool,
+    pub offline: bool,
+}
+
+impl Default for Visibility {
+    fn default() -> Self {
+        Self {
+            online: true,
+            offline: true,
+        }
+    }
+}
+
+impl Visibility {
+    pub fn shows(self, online: bool) -> bool {
+        if online { self.online } else { self.offline }
+    }
+}
+
+/// A player on the player layer: where their file last put them.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Marker {
+    pub uuid: uuid::Uuid,
+    pub name: Option<String>,
+    pub world: String,
+    pub dimension: String,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub yaw: f32,
+    /// When the player file was saved, Unix seconds.
+    pub last_seen: i64,
+    pub online: bool,
+}
+
+/// The markers with who is online marked, without the players the server's setting hides
+/// (they never leave the backend).
+pub fn visible(markers: Vec<Marker>, presence: &Presence, visibility: Visibility) -> Vec<Marker> {
+    markers
+        .into_iter()
+        .filter_map(|mut marker| {
+            marker.online = presence.is_online(marker.uuid, marker.name.as_deref());
+            visibility.shows(marker.online).then_some(marker)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -180,5 +233,92 @@ mod tests {
         assert!(valid_name("Notch") && valid_name("jeb_") && valid_name(".BedrockGuy"));
         assert!(!valid_name("") && !valid_name("a b") && !valid_name("x;op me"));
         assert!(!valid_name("seventeen_chars_x") && !valid_name("@a"));
+    }
+
+    fn marker(id: u128, name: Option<&str>) -> Marker {
+        Marker {
+            uuid: uuid::Uuid::from_u128(id),
+            name: name.map(str::to_string),
+            world: "world".into(),
+            dimension: worlds::OVERWORLD.into(),
+            x: 0.0,
+            y: 64.0,
+            z: 0.0,
+            yaw: 0.0,
+            last_seen: 0,
+            online: false,
+        }
+    }
+
+    fn shown(presence: &Presence, visibility: Visibility) -> Vec<(String, bool)> {
+        let markers = vec![
+            marker(1, Some("Steve")),
+            marker(2, Some("Alex")),
+            marker(3, None),
+        ];
+        visible(markers, presence, visibility)
+            .into_iter()
+            .map(|marker| (marker.name.unwrap_or_default(), marker.online))
+            .collect()
+    }
+
+    #[test]
+    fn the_setting_filters_by_online_state() {
+        use crate::online::{Online, Source};
+        let presence = Presence::Answered(Online {
+            count: 1,
+            max: 20,
+            players: vec!["Steve".into()],
+            ids: Vec::new(),
+            complete: true,
+            source: Source::Query,
+        });
+        let everyone = vec![
+            ("Steve".to_string(), true),
+            ("Alex".to_string(), false),
+            (String::new(), false),
+        ];
+        assert_eq!(shown(&presence, Visibility::default()), everyone);
+        let online_only = Visibility {
+            online: true,
+            offline: false,
+        };
+        assert_eq!(
+            shown(&presence, online_only),
+            vec![("Steve".to_string(), true)]
+        );
+        let offline_only = Visibility {
+            online: false,
+            offline: true,
+        };
+        assert_eq!(shown(&presence, offline_only), everyone[1..].to_vec());
+        let nobody = Visibility {
+            online: false,
+            offline: false,
+        };
+        assert!(shown(&presence, nobody).is_empty());
+
+        // a stopped server, or no answer: everyone is offline, so "online only" shows nobody
+        for unknown in [Presence::NotRunning, Presence::Unknown("no answer".into())] {
+            assert!(shown(&unknown, online_only).is_empty());
+            assert_eq!(shown(&unknown, offline_only).len(), 3);
+        }
+    }
+
+    #[test]
+    fn every_server_shows_both_until_changed() {
+        // servers without a saved setting (every server before 0.1.2) get the default
+        assert_eq!(
+            Visibility::default(),
+            Visibility {
+                online: true,
+                offline: true,
+            }
+        );
+        let saved: Visibility =
+            serde_json::from_str(r#"{"online":false,"offline":true}"#).unwrap();
+        assert!(!saved.shows(true) && saved.shows(false));
+        // the page sends both; a missing one is an error, not a silent default
+        assert!(serde_json::from_str::<Visibility>(r#"{"online":false}"#).is_err());
     }
 }

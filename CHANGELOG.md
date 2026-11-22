@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.2
+
+- Online and offline players: each player is marked online or offline from the server itself
+  (the query port when `enable-query=true`, else the Server List Ping, both without console
+  commands), for every viewer and not only for teleports. Online markers have a green dot,
+  offline markers are greyed out. A stopped server, an unknown state or no answer counts everyone
+  as offline, and the Player Selection says so; a ping that names only some online players says
+  how many it missed.
+- "Online players" and "Offline players" toolbar toggles replace the single Players layer (both on
+  by default; a saved Players choice carries over). They filter the markers, the player select
+  and the counts, and are remembered per server with the rest of the view.
+- Per-server setting (gear in the Player Selection, new `world-map.manage-players` permission)
+  to stop showing online players and/or offline players on that server's map. The backend leaves
+  them out of the player list; existing servers keep showing both.
+- The player list refreshes every 30 seconds and when the server starts or stops.
+
 ## 0.1.1
 
 - Worlds with any name: the main world follows `level-name` from `server.properties` (Java

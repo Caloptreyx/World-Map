@@ -134,6 +134,15 @@
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mantine-primary-color-filled) 45%, transparent);
 }
 
+.wm-tool[aria-disabled='true'] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.wm-tool[aria-disabled='true']:active {
+  transform: none;
+}
+
 .wm-pill {
   height: 40px;
   display: inline-flex;
@@ -200,6 +209,26 @@
 }
 
 .wm-marker[data-selected='true'] .wm-marker-pin {
+  border-top-color: var(--mantine-primary-color-filled);
+}
+
+/* offline players: greyed out at their last saved position */
+.wm-marker[data-online='false'] .wm-marker-head {
+  filter: grayscale(1) brightness(0.8);
+  opacity: 0.75;
+  border-color: #9ca3af;
+}
+
+.wm-marker[data-online='false'] .wm-marker-pin {
+  border-top-color: #9ca3af;
+}
+
+.wm-marker[data-online='false'][data-selected='true'] .wm-marker-head {
+  opacity: 1;
+  border-color: var(--mantine-primary-color-filled);
+}
+
+.wm-marker[data-online='false'][data-selected='true'] .wm-marker-pin {
   border-top-color: var(--mantine-primary-color-filled);
 }
 

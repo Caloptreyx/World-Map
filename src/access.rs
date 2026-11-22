@@ -11,6 +11,7 @@ pub const DELETE_CHUNKS: &str = "world-map.delete-chunks";
 pub const TELEPORT: &str = "world-map.teleport";
 pub const RESET_HEATMAP: &str = "world-map.reset-heatmap";
 pub const MANAGE_WORLDS: &str = "world-map.manage-worlds";
+pub const MANAGE_PLAYERS: &str = "world-map.manage-players";
 
 const READ_FILES: &str = "files.read-content";
 const WRITE_FILES: &str = "files.update";
@@ -58,6 +59,8 @@ pub enum Action {
     ResetHeatmap,
     /// Adding world folders the map does not find by itself.
     ManageWorlds,
+    /// Choosing whether the map shows online and offline players on the server.
+    ManagePlayers,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -77,6 +80,7 @@ impl Action {
             Self::Teleport => &[VIEW, TELEPORT, CONSOLE],
             Self::ResetHeatmap => &[VIEW, RESET_HEATMAP],
             Self::ManageWorlds => &[VIEW, READ_FILES, MANAGE_WORLDS],
+            Self::ManagePlayers => &[VIEW, MANAGE_PLAYERS],
         }
     }
 
@@ -120,6 +124,7 @@ pub struct Capabilities {
     pub teleport: bool,
     pub reset_heatmap: bool,
     pub manage_worlds: bool,
+    pub manage_players: bool,
 }
 
 pub fn capabilities(grants: &impl Grants) -> Capabilities {
@@ -128,6 +133,7 @@ pub fn capabilities(grants: &impl Grants) -> Capabilities {
         teleport: Action::Teleport.granted(grants),
         reset_heatmap: Action::ResetHeatmap.granted(grants),
         manage_worlds: Action::ManageWorlds.granted(grants),
+        manage_players: Action::ManagePlayers.granted(grants),
     }
 }
 
@@ -178,6 +184,7 @@ mod tests {
         TELEPORT,
         RESET_HEATMAP,
         MANAGE_WORLDS,
+        MANAGE_PLAYERS,
         READ_FILES,
         WRITE_FILES,
         CONSOLE,
@@ -247,6 +254,14 @@ mod tests {
             Action::ManageWorlds.check(&set(&[VIEW, READ_FILES]), None),
             Err(Denied::Permission(MANAGE_WORLDS))
         );
+        assert_eq!(
+            Action::ManagePlayers.check(&set(&[VIEW, READ_FILES]), None),
+            Err(Denied::Permission(MANAGE_PLAYERS))
+        );
+        assert_eq!(
+            Action::ManagePlayers.check(&set(&[VIEW, MANAGE_PLAYERS]), None),
+            Ok(())
+        );
         let viewer = set(&[VIEW, READ_FILES, CONSOLE]);
         assert_eq!(
             capabilities(&viewer),
@@ -255,6 +270,7 @@ mod tests {
                 teleport: false,
                 reset_heatmap: false,
                 manage_worlds: false,
+                manage_players: false,
             }
         );
         assert!(!may_list_by_console(&viewer));
@@ -266,6 +282,7 @@ mod tests {
                 teleport: true,
                 reset_heatmap: true,
                 manage_worlds: true,
+                manage_players: true,
             }
         );
         assert!(may_list_by_console(&everything));

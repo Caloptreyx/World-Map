@@ -6,8 +6,10 @@ use crate::{
     anvil, cache::Memo,
     coords::{self, ChunkRect},
     db, entities,
-    map::{Map, SMALL_FILE, not_found},
-    online, players, render, tiles,
+    map::{Layout, Map, SMALL_FILE, not_found},
+    online::{self, Presence},
+    players::{self, Visibility},
+    render, tiles,
     worlds::{self, OLDEST_DATA_VERSION},
 };
 use axum::{
@@ -94,6 +96,7 @@ async fn overview(
         "extra_worlds": layout.extra_worlds,
         "power": power_name(power(&map).await),
         "capabilities": access::capabilities(&*permissions),
+        "player_visibility": db::player_visibility(&state.database, server.uuid).await?,
         "heatmap": {
             "enabled": settings.heatmap_enabled,
             "interval_minutes": settings.heatmap_interval_minutes,
@@ -183,16 +186,26 @@ async fn tile(
         .with_header("ETag", &etag))
 }
 
-async fn player_list(
-    state: GetState,
-    permissions: GetPermissionManager,
-    server: GetServer,
-) -> ApiResponseResult {
-    access::authorize(Action::View, &permissions, None)?;
-    let map = Map::open(&state, &server).await?;
-    let layout = map.layout(false).await?;
+/// Who is online, as far as the server says without its console.
+async fn presence(map: &Map, properties: Option<&str>) -> Presence {
+    match power(map).await {
+        Some(Power::Running) => match online::quietly(&map.wings, properties).await {
+            Ok(online) => Presence::Answered(online),
+            Err(err) => Presence::Unknown(err.message().to_string()),
+        },
+        Some(_) => Presence::NotRunning,
+        None => Presence::Unknown("the node did not report the server's state".into()),
+    }
+}
+
+/// Every player with a saved position in a world the map knows, newest first.
+async fn markers(
+    map: &Map,
+    layout: &Layout,
+    server_uuid: Uuid,
+) -> Result<Vec<players::Marker>, ApiResponse> {
     let Some(folder) = layout.main().and_then(|world| world.players.clone()) else {
-        return ApiResponse::new_serialized(json!({ "players": [] })).ok();
+        return Ok(Vec::new());
     };
     let mut files: Vec<_> = map
         .wings
@@ -205,15 +218,13 @@ async fn player_list(
         .collect();
     files.sort_by_key(|(_, entry)| std::cmp::Reverse(entry.modified));
     files.truncate(MAX_PLAYERS);
-    let names = map
+    let mut names = map
         .read("usercache.json", SMALL_FILE)
         .await?
         .map(|bytes| players::usercache(&bytes))
         .unwrap_or_default();
 
-    let map = &map;
     let folder = &folder;
-    let server_uuid = server.uuid;
     let positions: Vec<_> = stream::iter(files)
         .map(|(uuid, entry)| async move {
             let key = (
@@ -244,23 +255,51 @@ async fn player_list(
         .filter_map(|(uuid, seen, position)| {
             let position = position?;
             let (world, dimension) = layout.locate(position.world, &position.dimension)?;
-            Some(json!({
-                "uuid": uuid,
-                "name": names.get(&uuid),
-                "world": world.name,
-                "dimension": dimension.id,
-                "x": position.x,
-                "y": position.y,
-                "z": position.z,
-                "yaw": position.yaw,
-                "last_seen": seen,
-            }))
+            Some(players::Marker {
+                uuid,
+                name: names.remove(&uuid),
+                world: world.name.clone(),
+                dimension: dimension.id.clone(),
+                x: position.x,
+                y: position.y,
+                z: position.z,
+                yaw: position.yaw,
+                last_seen: seen,
+                online: false,
+            })
         })
         .collect();
-    list.sort_by_key(|player| std::cmp::Reverse(player["last_seen"].as_i64()));
-    ApiResponse::new_serialized(json!({ "players": list })).ok()
+    list.sort_by_key(|player| std::cmp::Reverse(player.last_seen));
+    Ok(list)
 }
 
+/// The player layer: each player's last saved position and whether they are online now, only
+/// of the kinds (online, offline) the server's setting shows.
+async fn player_list(
+    state: GetState,
+    permissions: GetPermissionManager,
+    server: GetServer,
+) -> ApiResponseResult {
+    access::authorize(Action::View, &permissions, None)?;
+    let visibility = db::player_visibility(&state.database, server.uuid).await?;
+    if !visibility.online && !visibility.offline {
+        return ApiResponse::new_serialized(json!({ "players": [], "presence": null })).ok();
+    }
+    let map = Map::open(&state, &server).await?;
+    let layout = map.layout(false).await?;
+    let (presence, markers) = tokio::join!(
+        presence(&map, layout.properties.as_deref()),
+        markers(&map, &layout, server.uuid)
+    );
+    let shown = players::visible(markers?, &presence, visibility);
+    ApiResponse::new_serialized(json!({
+        "players": shown,
+        "presence": presence.summary(visibility.online),
+    }))
+    .ok()
+}
+
+/// Who is online by name, for teleports; the console's `list` for users who may teleport.
 async fn online_players(
     state: GetState,
     permissions: GetPermissionManager,
@@ -269,7 +308,14 @@ async fn online_players(
 ) -> ApiResponseResult {
     access::authorize(Action::View, &permissions, None)?;
     let map = Map::open(&state, &server).await?;
-    if power(&map).await != Some(Power::Running) {
+    let running = power(&map).await == Some(Power::Running);
+    if !db::player_visibility(&state.database, server.uuid).await?.online {
+        return ApiResponse::new_serialized(
+            json!({ "running": running, "online": null, "hidden": true }),
+        )
+        .ok();
+    }
+    if !running {
         return ApiResponse::new_serialized(json!({ "running": false, "online": null })).ok();
     }
     let layout = map.layout(false).await?;
@@ -283,6 +329,21 @@ async fn online_players(
             .await;
     }
     ApiResponse::new_serialized(json!({ "running": true, "online": online? })).ok()
+}
+
+async fn update_player_visibility(
+    state: GetState,
+    permissions: GetPermissionManager,
+    server: GetServer,
+    activity_logger: GetServerActivityLogger,
+    Payload(data): Payload<Visibility>,
+) -> ApiResponseResult {
+    access::authorize(Action::ManagePlayers, &permissions, None)?;
+    db::set_player_visibility(&state.database, server.uuid, data).await?;
+    activity_logger
+        .log("server:worldmap.update-player-visibility", json!(data))
+        .await;
+    ApiResponse::new_serialized(json!({ "player_visibility": data })).ok()
 }
 
 #[derive(Deserialize)]
@@ -665,6 +726,7 @@ pub fn router(state: &State) -> OpenApiRouter<State> {
         .route("/chunks/delete", post(delete_chunks))
         .route("/teleport", post(teleport))
         .route("/worlds", put(update_worlds))
+        .route("/players/visibility", put(update_player_visibility))
         .with_state(state.clone())
 }
 

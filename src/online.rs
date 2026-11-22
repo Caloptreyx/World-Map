@@ -1,16 +1,17 @@
-//! Who is online on a running Java server, for teleports: the Server List Ping (no side effects)
-//! and, when its sample does not name everyone, the console's answer to `list`. Adapted from
-//! Caloptreyx/Player-Manager (MIT).
+//! Who is online on a running Java server: the query port when `enable-query` is on and the
+//! Server List Ping (both without side effects), and, for users who may use the console, its
+//! answer to `list` when they do not name everyone. Adapted from Caloptreyx/Player-Manager (MIT).
 use crate::{
     files::Wings,
+    query,
     tunnel::{self, TunnelError},
 };
-use axum::http::StatusCode;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use shared::response::ApiResponse;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use uuid::Uuid;
 
 const JAVA_PORT: u16 = 25565;
 /// The protocol's packet size limit.
@@ -22,13 +23,88 @@ const TAIL_LINES: u64 = 100;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Where an answer about who is online came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    Query,
+    Ping,
+    Console,
+}
+
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct Online {
     pub count: u32,
     pub max: u32,
     pub players: Vec<String>,
+    /// The UUIDs the answer gave (the ping's sample), for players without a cached name.
+    #[serde(skip)]
+    pub ids: Vec<Uuid>,
     /// Every player online is named.
     pub complete: bool,
+    pub source: Source,
+}
+
+impl From<query::FullStat> for Online {
+    fn from(stat: query::FullStat) -> Self {
+        Self {
+            complete: stat.names.len() >= stat.count as usize,
+            count: stat.count,
+            max: stat.max,
+            players: stat.names,
+            ids: Vec::new(),
+            source: Source::Query,
+        }
+    }
+}
+
+/// What the map knows about who is online, for the player layer.
+#[derive(Debug)]
+pub enum Presence {
+    /// The server is not running: nobody is online.
+    NotRunning,
+    /// No source said who is online (or the node did not report the server's state).
+    Unknown(String),
+    Answered(Online),
+}
+
+impl Presence {
+    /// Whether the answer names the player (by UUID, or by name ignoring case as the game
+    /// does). Players it does not name count as offline, also when it is incomplete.
+    pub fn is_online(&self, uuid: Uuid, name: Option<&str>) -> bool {
+        let Self::Answered(online) = self else {
+            return false;
+        };
+        online.ids.contains(&uuid)
+            || name.is_some_and(|name| {
+                online
+                    .players
+                    .iter()
+                    .any(|player| player.eq_ignore_ascii_case(name))
+            })
+    }
+
+    /// The state for the page; the counts only when online players are shown.
+    pub fn summary(&self, counts: bool) -> Value {
+        match self {
+            Self::NotRunning => json!({ "state": "not_running" }),
+            Self::Unknown(error) => json!({ "state": "unknown", "error": error }),
+            Self::Answered(online) => {
+                let state = if online.complete { "known" } else { "partial" };
+                if counts {
+                    json!({
+                        "state": state,
+                        "source": online.source,
+                        "count": online.count,
+                        "max": online.max,
+                        "named": online.players.len(),
+                    })
+                } else {
+                    json!({ "state": state, "source": online.source })
+                }
+            }
+        }
+    }
 }
 
 /// A value from `server.properties`.
@@ -96,17 +172,18 @@ fn status_request(host: &str, port: u16) -> Vec<u8> {
     request
 }
 
-/// A sample entry that names a real player: servers fill the sample with text lines (the nil
-/// UUID, `§` formatting, spaces).
-fn sample_player(entry: &Value) -> Option<String> {
+/// A sample entry that names a real player, and its UUID: servers fill the sample with text
+/// lines (the nil UUID, `§` formatting, spaces).
+fn sample_player(entry: &Value) -> Option<(String, Option<Uuid>)> {
     let name = entry.get("name")?.as_str()?;
     if name.is_empty() || name.contains(['§', ' ']) {
         return None;
     }
-    if entry.get("id").and_then(Value::as_str) == Some(NIL_UUID) {
+    let id = entry.get("id").and_then(Value::as_str);
+    if id == Some(NIL_UUID) {
         return None;
     }
-    Some(name.to_string())
+    Some((name.to_string(), id.and_then(|id| Uuid::parse_str(id).ok())))
 }
 
 /// The players of a status JSON; complete when every player online is in the sample.
@@ -124,16 +201,18 @@ fn parse_status(json: &[u8]) -> Result<Online, TunnelError> {
             .ok_or_else(|| TunnelError::failed(format!("the status has no players.{key}")))
     };
     let (count, max) = (number("online")?, number("max")?);
-    let players: Vec<String> = players
+    let (players, ids): (Vec<String>, Vec<Option<Uuid>>) = players
         .get("sample")
         .and_then(Value::as_array)
-        .map(|sample| sample.iter().filter_map(sample_player).collect())
+        .map(|sample| sample.iter().filter_map(sample_player).unzip())
         .unwrap_or_default();
     Ok(Online {
         complete: players.len() == count as usize,
         count,
         max,
         players,
+        ids: ids.into_iter().flatten().collect(),
+        source: Source::Ping,
     })
 }
 
@@ -307,6 +386,8 @@ fn parse_list(lines: &[String]) -> Option<Online> {
             count,
             max,
             players,
+            ids: Vec::new(),
+            source: Source::Console,
         });
     }
     None
@@ -327,48 +408,135 @@ async fn ask_list(wings: &Wings, command: &str) -> Result<Option<Online>, ApiRes
     Ok(None)
 }
 
-/// The players online: the ping when it names everyone, else the console (when `console`,
-/// the caller may use it; every command sent is returned for the activity log).
+/// What the sources tried so far gave: the fullest incomplete answer and the last error.
+#[derive(Default)]
+struct Attempts {
+    partial: Option<Online>,
+    error: Option<TunnelError>,
+}
+
+impl Attempts {
+    /// `online` when it is complete; otherwise kept when it names more players than the
+    /// answer kept so far.
+    fn answer(&mut self, online: Online) -> Option<Online> {
+        if online.complete {
+            return Some(online);
+        }
+        if self
+            .partial
+            .as_ref()
+            .is_none_or(|kept| online.players.len() > kept.players.len())
+        {
+            self.partial = Some(online);
+        }
+        None
+    }
+
+    fn failed(&mut self, error: TunnelError) {
+        self.error = Some(error);
+    }
+
+    /// The fullest incomplete answer, else the last error.
+    fn finish(self) -> Result<Online, TunnelError> {
+        match (self.partial, self.error) {
+            (Some(online), _) => Ok(online),
+            (None, Some(error)) => Err(error),
+            (None, None) => Err(TunnelError::failed("no source answered")),
+        }
+    }
+}
+
+/// The port players join on (`server-port`, else the allocation's) and the query port when
+/// `enable-query` is on (`query.port`, else the game port).
+fn ports(properties: Option<&str>, allocation_port: Option<u16>) -> (u16, Option<u16>) {
+    let content = properties.unwrap_or_default();
+    let number = |key: &str| {
+        property(content, key)
+            .and_then(|port| port.parse::<u16>().ok())
+            .filter(|&port| port != 0)
+    };
+    let game = number("server-port")
+        .or(allocation_port)
+        .unwrap_or(JAVA_PORT);
+    let query = (property(content, "enable-query") == Some("true"))
+        .then(|| number("query.port").unwrap_or(game));
+    (game, query)
+}
+
+/// Asks the sources without side effects: the query port, then the Server List Ping.
+async fn ask_quietly(
+    wings: &Wings,
+    properties: Option<&str>,
+    attempts: &mut Attempts,
+) -> Option<Online> {
+    let (host, allocation_port) = match wings.address() {
+        Some((host, port)) => (host.clone(), Some(*port)),
+        None => ("localhost".to_string(), None),
+    };
+    let (port, query_port) = ports(properties, allocation_port);
+    if let Some(query_port) = query_port {
+        match query::full_stat(wings, query_port).await {
+            Ok(stat) => {
+                if let Some(online) = attempts.answer(stat.into()) {
+                    return Some(online);
+                }
+            }
+            Err(err) => attempts.failed(err),
+        }
+    }
+    let ping = tunnel::bounded(async {
+        let mut stream = wings.tcp(port).await?;
+        status(&mut stream, &host, port).await
+    })
+    .await;
+    match ping {
+        Ok(online) => attempts.answer(online),
+        Err(err) => {
+            attempts.failed(err);
+            None
+        }
+    }
+}
+
+/// The players online as far as the query port and the ping tell, without the console: for
+/// the player layer, which refreshes in the background.
+pub async fn quietly(wings: &Wings, properties: Option<&str>) -> Result<Online, TunnelError> {
+    let mut attempts = Attempts::default();
+    match ask_quietly(wings, properties, &mut attempts).await {
+        Some(online) => Ok(online),
+        None => attempts.finish(),
+    }
+}
+
+/// The players online: the query port or the ping when they name everyone, else the console
+/// (when `console`, the caller may use it; every command sent is returned for the activity
+/// log).
 pub async fn java(
     wings: &Wings,
     properties: Option<&str>,
     console: bool,
     sent: &mut Vec<&'static str>,
 ) -> Result<Online, ApiResponse> {
-    let (host, allocation_port) = match wings.address() {
-        Some((host, port)) => (host.clone(), Some(*port)),
-        None => ("localhost".to_string(), None),
-    };
-    let port = properties
-        .and_then(|content| property(content, "server-port"))
-        .and_then(|port| port.parse::<u16>().ok())
-        .filter(|&port| port != 0)
-        .or(allocation_port)
-        .unwrap_or(JAVA_PORT);
-    let ping = tunnel::bounded(async {
-        let mut stream = wings.tcp(port).await?;
-        status(&mut stream, &host, port).await
-    })
-    .await;
-    if ping.as_ref().is_ok_and(|online| online.complete) {
-        return ping.map_err(TunnelError::response);
+    let mut attempts = Attempts::default();
+    if let Some(online) = ask_quietly(wings, properties, &mut attempts).await {
+        return Ok(online);
     }
     if console {
         for command in LIST_COMMANDS {
             sent.push(command);
-            if let Some(answer) = ask_list(wings, command).await? {
-                return Ok(answer);
+            match ask_list(wings, command).await? {
+                Some(answer) => {
+                    if let Some(online) = attempts.answer(answer) {
+                        return Ok(online);
+                    }
+                }
+                None => attempts.failed(TunnelError::NoAnswer(
+                    "the server did not answer the list command".into(),
+                )),
             }
         }
     }
-    match ping {
-        Ok(online) => Ok(online),
-        Err(_) if console => Err(ApiResponse::error(
-            "the server did not answer the list command",
-        )
-        .with_status(StatusCode::GATEWAY_TIMEOUT)),
-        Err(err) => Err(err.response()),
-    }
+    attempts.finish().map_err(TunnelError::response)
 }
 
 #[cfg(test)]
@@ -415,6 +583,14 @@ mod tests {
         .unwrap();
         assert_eq!(online.players, vec!["Notch", "jeb_"]);
         assert!(!online.complete);
+        assert_eq!(
+            online.ids,
+            vec![
+                Uuid::parse_str("069a79f4-44e9-4726-a5be-fca90e38aaf5").unwrap(),
+                Uuid::parse_str("853c80ef-3c37-49fd-aa49-938b674adae6").unwrap(),
+            ]
+        );
+        assert_eq!(online.source, Source::Ping);
         let empty = parse_response(&response(r#"{"players":{"max":10,"online":0}}"#)).unwrap();
         assert!(empty.complete);
     }
@@ -447,7 +623,9 @@ mod tests {
                 count: 2,
                 max: 20,
                 players: vec!["Notch".into(), "jeb_".into()],
+                ids: Vec::new(),
                 complete: true,
+                source: Source::Console,
             })
         );
         let legacy = owned(&[
@@ -474,5 +652,99 @@ mod tests {
         assert_eq!(property(content, "server-port"), Some("25570"));
         assert_eq!(property(content, "server-ip"), Some(""));
         assert_eq!(property(content, "query.port"), None);
+    }
+
+    #[test]
+    fn query_only_when_enabled() {
+        assert_eq!(ports(None, None), (25565, None));
+        assert_eq!(ports(Some("server-port=0\n"), Some(25570)), (25570, None));
+        assert_eq!(
+            ports(Some("server-port=25580\nenable-query=true\n"), Some(25570)),
+            (25580, Some(25580))
+        );
+        assert_eq!(
+            ports(Some("enable-query=true\nquery.port=25600\n"), Some(25570)),
+            (25570, Some(25600))
+        );
+        assert_eq!(
+            ports(Some("enable-query=false\nquery.port=25600\n"), None),
+            (25565, None)
+        );
+    }
+
+    fn online(players: &[&str], ids: &[u128], count: u32, source: Source) -> Online {
+        Online {
+            count,
+            max: 20,
+            players: players.iter().map(|name| name.to_string()).collect(),
+            ids: ids.iter().copied().map(Uuid::from_u128).collect(),
+            complete: players.len() >= count as usize,
+            source,
+        }
+    }
+
+    #[test]
+    fn the_fullest_answer_wins() {
+        let mut attempts = Attempts::default();
+        assert!(attempts.answer(online(&["a"], &[], 3, Source::Ping)).is_none());
+        attempts.failed(TunnelError::failed("query: no answer"));
+        assert!(attempts.answer(online(&[], &[], 3, Source::Console)).is_none());
+        let kept = attempts.finish().unwrap();
+        assert_eq!((kept.players.len(), kept.source), (1, Source::Ping));
+
+        let mut attempts = Attempts::default();
+        attempts.failed(TunnelError::failed("ping: refused"));
+        assert_eq!(
+            attempts.finish().unwrap_err(),
+            TunnelError::failed("ping: refused")
+        );
+
+        let mut attempts = Attempts::default();
+        let complete = attempts.answer(online(&["a", "b"], &[], 2, Source::Query));
+        assert_eq!(complete.unwrap().source, Source::Query);
+    }
+
+    #[test]
+    fn players_are_online_only_when_named() {
+        let steve = Uuid::from_u128(1);
+        let alex = Uuid::from_u128(2);
+        let unnamed = Uuid::from_u128(3);
+
+        let answered = Presence::Answered(online(&["Steve"], &[3], 2, Source::Ping));
+        assert!(answered.is_online(steve, Some("Steve")));
+        // names are matched like the game does, ignoring case
+        assert!(answered.is_online(steve, Some("steve")));
+        // the sample's UUID places a player usercache.json has no name for
+        assert!(answered.is_online(unnamed, None));
+        // not named in an incomplete answer: counted offline
+        assert!(!answered.is_online(alex, Some("Alex")));
+        assert!(!answered.is_online(Uuid::from_u128(9), None));
+
+        for nobody in [Presence::NotRunning, Presence::Unknown("ping: refused".into())] {
+            assert!(!nobody.is_online(steve, Some("Steve")));
+        }
+    }
+
+    #[test]
+    fn the_summary_hides_counts_with_online_players() {
+        let partial = Presence::Answered(online(&["Steve"], &[], 4, Source::Ping));
+        assert_eq!(
+            partial.summary(true),
+            json!({ "state": "partial", "source": "ping", "count": 4, "max": 20, "named": 1 })
+        );
+        assert_eq!(
+            partial.summary(false),
+            json!({ "state": "partial", "source": "ping" })
+        );
+        let known = Presence::Answered(online(&["Steve"], &[], 1, Source::Query));
+        assert_eq!(known.summary(true)["state"], "known");
+        assert_eq!(
+            Presence::NotRunning.summary(true),
+            json!({ "state": "not_running" })
+        );
+        assert_eq!(
+            Presence::Unknown("no answer in time".into()).summary(false),
+            json!({ "state": "unknown", "error": "no answer in time" })
+        );
     }
 }

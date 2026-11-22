@@ -2,7 +2,7 @@
 name = "dev_caloptreyx_worldmap"
 description = "A top-down map of Minecraft Java worlds read from the server files: players, mobs and entities, a player heatmap, chunk deletion and teleports."
 authors = ["Caloptreyx"]
-version = "0.1.1"
+version = "0.1.2"
 edition = { workspace = true }
 
 [dependencies]

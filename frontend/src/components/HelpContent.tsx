@@ -46,7 +46,7 @@ export default function HelpContent({ heatmapDays }: { heatmapDays: number }) {
       <Text size='xs' fw={600} mt={4}>
         {t('help.title', {})}
       </Text>
-      {(['move', 'select', 'menu', 'heatmap', 'worlds', 'data'] as const).map((key) => (
+      {(['move', 'select', 'menu', 'players', 'heatmap', 'worlds', 'data'] as const).map((key) => (
         <Text key={key} size='xs' c='dimmed'>
           {t(`help.${key}`, {})}
         </Text>

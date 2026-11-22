@@ -24,7 +24,8 @@ import {
 } from '../lib/geometry.ts';
 
 export interface Layers {
-  players: boolean;
+  onlinePlayers: boolean;
+  offlinePlayers: boolean;
   markers: boolean;
   heatmap: boolean;
   mobs: boolean;

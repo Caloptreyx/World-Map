@@ -23,6 +23,7 @@ mod map;
 mod nbt;
 mod online;
 mod players;
+mod query;
 mod render;
 mod routes;
 mod settings;
@@ -97,6 +98,10 @@ impl Extension for ExtensionStruct {
                     (
                         "manage-worlds",
                         "Allows adding world folders the map does not find by itself. Also needs permission to read file contents.",
+                    ),
+                    (
+                        "manage-players",
+                        "Allows choosing whether the map shows online players, offline players or both on this server.",
                     ),
                 ]),
             },
