@@ -900,7 +900,7 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
 
       {overview.capabilities.manage_worlds && (
         <WorldsModal
-          key={String(foldersOpen)}
+          key={`folders-${foldersOpen}`}
           server={server}
           overview={overview}
           opened={foldersOpen}
@@ -909,7 +909,7 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
       )}
       {overview.capabilities.manage_players && (
         <PlayerVisibilityModal
-          key={String(visibilityOpen)}
+          key={`visibility-${visibilityOpen}`}
           server={server}
           visibility={visibility}
           opened={visibilityOpen}
