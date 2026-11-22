@@ -32,6 +32,21 @@ Package name: `dev.caloptreyx.worldmap` · Requires panel `>=1.2.10`
   position readout and its actions, pinch to zoom, and in chunk selection tap chunks to toggle
   them or press and hold, then drag, to add a rectangle.
 
+## Screenshots
+
+**World Map page**: the overworld drawn from the region files, with the World Overview and Player
+Selection panels.
+
+![World Map page](docs/screenshots/map.png)
+
+**Mobs and entities**: grouped markers with a count per area once you zoom in.
+
+![Zoomed-in map with mob markers](docs/screenshots/mobs-and-entities.png)
+
+**Admin settings**: eggs, heatmap sampling and rendering limits.
+
+![World Map admin settings](docs/screenshots/admin-settings.png)
+
 ## How the data is read
 
 No plugin or mod is needed. The backend reads the world through the panel's file access (Wings),
