@@ -220,6 +220,8 @@ where
         let outcome = tokio::spawn(work(runner.clone())).await;
         let mut job = runner.lock();
         job.finished = Some(chrono::Utc::now().timestamp());
+        // a message describes the running work, not the outcome
+        job.message = None;
         match outcome {
             Ok(Ok(result)) => {
                 job.state = if runner.is_cancelled() {

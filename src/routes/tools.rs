@@ -725,12 +725,19 @@ async fn restore_operation(
         &world.clone(),
         &dimension.clone(),
         move |handle| async move {
+            handle.progress(0, 1);
             handle.message(format!("restoring from {}", operation.backup));
             let _lock = ops::lock(map.server).await;
             let result = match ops::restore(&map, user, id).await {
-                Ok(restored) => Ok(
-                    json!({ "chunks": operation.summary["chunks"], "files": restored.files, "operation": restored }),
-                ),
+                Ok(restored) => {
+                    handle.progress(1, 1);
+                    Ok(json!({
+                        "chunks": operation.summary["chunks"],
+                        "skipped": 0,
+                        "files": restored.files,
+                        "operation": restored,
+                    }))
+                }
                 Err(err) => Err(Stop::Failed(jobs::describe(err).await)),
             };
             if let Ok(layout) = map.layout(false).await
