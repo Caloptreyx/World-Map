@@ -1902,7 +1902,7 @@ mod tests {
             &spawner
         ));
         assert!(check("Compression = GZIP AND Compression = 1", &proto));
-        assert!(!check("Compression = ZLIB_EXT", &spawner));
+        assert!(!check("Compression = \"ZLIB_EXT\"", &spawner));
         assert!(check("Size = 5347", &spawner));
         assert!(check("Size > 3000 AND Size < 4000", &proto));
         assert!(check("#TileEntities = 2", &spawner));
@@ -1934,7 +1934,7 @@ mod tests {
         ));
         assert!(check("Structures contains Mineshaft", &spawner));
         // an empty reference list is no reference
-        assert!(check("Structures !contains village_plains", &spawner));
+        assert!(check("Structures !contains \"village_plains\"", &spawner));
         assert!(!check(
             "Structures intersects \"village_plains,igloo\"",
             &spawner
@@ -2020,7 +2020,7 @@ mod tests {
         // no status, no palette
         assert!(check("DataVersion = 1343", &v112));
         assert!(check("Biome contains plains", &v112));
-        assert!(!check("Biome contains sunflower_plains", &v112));
+        assert!(!check("Biome contains \"sunflower_plains\"", &v112));
         assert!(check("LightPopulated = 1", &v112));
         assert!(check("Status != full", &v112));
         assert!(!check("Status = full", &v112));
