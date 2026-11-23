@@ -179,10 +179,6 @@ impl Map {
         self.wings.read(&format!("/{path}"), max).await
     }
 
-    pub async fn write(&self, path: &str, user: Uuid, data: Vec<u8>) -> Result<Option<i64>, ApiResponse> {
-        self.wings.write(&format!("/{path}"), user, data).await
-    }
-
     pub fn region_limit(&self) -> u64 {
         u64::from(self.settings.max_region_mb) << 20
     }

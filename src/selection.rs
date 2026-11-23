@@ -1,13 +1,13 @@
 //! MCA Selector's selection model (`selection/Selection.java`): per region either the whole region
 //! or a set of its 1024 chunks, plus `inverted` ("everything except"). Inverted selections are
 //! resolved within the regions that exist (region ∪ entities ∪ poi files), as
-//! `Selection.getTrueSelection` does. Also the JSON wire format shared with the frontend and
-//! MCA Selector's selection CSV (`readFromFile` / `saveToFile`).
+//! `Selection.getTrueSelection` does. Also the JSON wire format shared with the frontend (the
+//! frontend reads and writes MCA Selector's CSV files).
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Most regions one selection may name (wire format and CSV).
+/// Most regions one selection may name.
 pub const MAX_REGIONS: usize = 1_000_000;
 
 /// Chunks of one region: bit `i = (x & 31) + (z & 31) * 32`, bit `i & 63` of word `i >> 6`.
@@ -271,103 +271,6 @@ impl Selection {
             }
         }
     }
-
-    /// Selects a whole region (MCA Selector's `addRegion`).
-    pub fn add_region(&mut self, region: (i32, i32)) {
-        if self.inverted {
-            self.regions.remove(&region);
-        } else {
-            self.regions.insert(region, None);
-        }
-    }
-
-    /// The listed chunks, ignoring `inverted` (MCA Selector's `count`: 1024 per whole region).
-    pub fn count(&self) -> u64 {
-        self.regions
-            .values()
-            .map(|chunks| chunks.map_or(1024, |set| u64::from(set.count())))
-            .sum()
-    }
-
-    /// MCA Selector's `saveToFile`: `inverted` on the first line when inverted, then `rx;rz` per
-    /// whole region and `rx;rz;cx;cz` per chunk of partial regions (absolute chunk coordinates),
-    /// each line ending in `\n`. Regions in ascending (x, z) order.
-    pub fn to_csv(&self) -> String {
-        let mut out = String::new();
-        if self.inverted {
-            out.push_str("inverted\n");
-        }
-        for (&(rx, rz), chunks) in &self.regions {
-            match chunks {
-                None => out.push_str(&format!("{rx};{rz}\n")),
-                Some(set) => {
-                    for i in set.iter() {
-                        let (cx, cz) = chunk_at((rx, rz), i);
-                        out.push_str(&format!("{rx};{rz};{cx};{cz}\n"));
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    /// MCA Selector's `readFromFile`: an optional `inverted` first line, then lines of `rx;rz`
-    /// (whole region) or `rx;rz;cx;cz` (one chunk, which must lie in that region). Errors name
-    /// the 1-based line like MCA Selector's messages.
-    pub fn from_csv(text: &str) -> Result<Self, String> {
-        let mut selection = Self::default();
-        let mut inverted = false;
-        for (index, line) in text.lines().enumerate() {
-            let num = index + 1;
-            if num == 1 && line == "inverted" {
-                inverted = true;
-                continue;
-            }
-            let elements = java_split(line);
-            if elements.len() != 2 && elements.len() != 4 {
-                return Err(format!(
-                    "invalid region or chunk coordinate format in line {num}"
-                ));
-            }
-            let (Ok(x), Ok(z)) = (elements[0].parse::<i32>(), elements[1].parse::<i32>()) else {
-                return Err(format!("failed to read region coordinates in line {num}"));
-            };
-            if elements.len() == 4 {
-                let (Ok(cx), Ok(cz)) = (elements[2].parse::<i32>(), elements[3].parse::<i32>())
-                else {
-                    return Err(format!("failed to read chunk coordinates in line {num}"));
-                };
-                if chunk_region(cx, cz) != (x, z) {
-                    return Err(format!(
-                        "chunk <{cx}, {cz}> is not in region <{x}, {z}> in line {num}"
-                    ));
-                }
-                selection.add_chunk(cx, cz);
-            } else {
-                selection.add_region((x, z));
-            }
-            if selection.regions.len() > MAX_REGIONS {
-                return Err(format!(
-                    "a selection may name at most {MAX_REGIONS} regions"
-                ));
-            }
-        }
-        selection.inverted = inverted;
-        Ok(selection)
-    }
-}
-
-/// Java's `String.split(";")`: no separator = the whole line; otherwise trailing empty fields
-/// are dropped.
-fn java_split(line: &str) -> Vec<&str> {
-    if !line.contains(';') {
-        return vec![line];
-    }
-    let mut fields: Vec<&str> = line.split(';').collect();
-    while fields.last().is_some_and(|field| field.is_empty()) {
-        fields.pop();
-    }
-    fields
 }
 
 #[cfg(test)]
@@ -470,11 +373,10 @@ mod tests {
     fn selection_checks_chunks_like_mca_selector() {
         let mut selection = Selection::default();
         selection.add_chunk(-1, -1);
-        selection.add_region((2, 0));
+        selection.regions.insert((2, 0), None);
         assert!(selection.is_selected(-1, -1));
         assert!(!selection.is_selected(-2, -1));
         assert!(selection.is_selected(64, 31));
-        assert_eq!(selection.count(), 1025);
         assert_eq!(selection.regions[&(-1, -1)], Some(set_of(&[1023])));
         selection.inverted = true;
         assert!(!selection.is_selected(-1, -1));
@@ -492,7 +394,6 @@ mod tests {
             }
         }
         assert_eq!(selection.regions[&(0, 0)], None);
-        assert_eq!(selection.count(), 1024);
     }
 
     #[test]
@@ -517,51 +418,5 @@ mod tests {
         let resolved = plain.resolve(&existing);
         assert_eq!(resolved[&(0, 0)], ChunkSet::full());
         assert_eq!(resolved[&(9, 9)], set_of(&[3]));
-    }
-
-    #[test]
-    fn csv_round_trips_with_inverted_first_line() {
-        let selection = Selection {
-            inverted: true,
-            regions: BTreeMap::from([((-1, 0), None), ((0, -1), Some(set_of(&[0, 33])))]),
-        };
-        let csv = selection.to_csv();
-        assert_eq!(csv, "inverted\n-1;0\n0;-1;0;-32\n0;-1;1;-31\n");
-        assert_eq!(Selection::from_csv(&csv).unwrap(), selection);
-        let plain = Selection {
-            inverted: false,
-            ..selection
-        };
-        assert!(!plain.to_csv().starts_with("inverted"));
-        assert_eq!(Selection::from_csv(&plain.to_csv()).unwrap(), plain);
-        // Windows line endings and Java's dropped trailing separators
-        let read = Selection::from_csv("3;4;\r\n3;4;96;128\r\n").unwrap();
-        assert_eq!(read.regions[&(3, 4)], None);
-    }
-
-    #[test]
-    fn csv_errors_name_the_line() {
-        assert_eq!(
-            Selection::from_csv("1;2\n1;2;3").unwrap_err(),
-            "invalid region or chunk coordinate format in line 2"
-        );
-        assert_eq!(
-            Selection::from_csv("1;2\n\n").unwrap_err(),
-            "invalid region or chunk coordinate format in line 2"
-        );
-        assert_eq!(
-            Selection::from_csv("a;2").unwrap_err(),
-            "failed to read region coordinates in line 1"
-        );
-        assert_eq!(
-            Selection::from_csv("0;0;x;1").unwrap_err(),
-            "failed to read chunk coordinates in line 1"
-        );
-        assert_eq!(
-            Selection::from_csv("inverted\n0;0;32;0").unwrap_err(),
-            "chunk <32, 0> is not in region <0, 0> in line 2"
-        );
-        // "inverted" only counts on the first line
-        assert!(Selection::from_csv("0;0\ninverted").is_err());
     }
 }

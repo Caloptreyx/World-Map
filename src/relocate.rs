@@ -41,7 +41,8 @@ impl Ranges {
         Self { ranges: None }
     }
 
-    pub fn contains(&self, section_y: i32) -> bool {
+    #[cfg(test)]
+    fn contains(&self, section_y: i32) -> bool {
         self.contains_wide(i64::from(section_y))
     }
 

@@ -14,7 +14,7 @@ use crate::{
     ops::{self, OperationKind, Writer},
     overlay::Overlay,
     relocate::{self, Offset, Ranges},
-    selection::{ChunkSet, Selection},
+    selection::{ChunkSet, Selection, chunk_at},
     tiles,
 };
 use serde_json::json;
@@ -38,11 +38,6 @@ pub fn file_path(folder: &str, kind: &str, (x, z): Coords) -> String {
 
 pub fn mcc_path(folder: &str, kind: &str, chunk_x: i32, chunk_z: i32) -> String {
     format!("{folder}/{kind}/{}", anvil::mcc_name(chunk_x, chunk_z))
-}
-
-/// Absolute chunk coordinates of slot `index` of region `(rx, rz)`.
-pub fn chunk_at((rx, rz): Coords, index: usize) -> Coords {
-    (rx * 32 + (index % 32) as i32, rz * 32 + (index / 32) as i32)
 }
 
 async fn failed(response: ApiResponse) -> Stop {
@@ -816,7 +811,8 @@ fn apply_changes(
         let (mut region_root, mut entities_root, mut poi_root) = match roots {
             (Ok(r), Ok(e), Ok(p)) => (r, e, p),
             (Err(err), _, _) | (_, Err(err), _) | (_, _, Err(err)) => {
-                errors.push(format!("chunk {index}: {err}"));
+                let (x, z) = chunk_at(region, index);
+                errors.push(format!("chunk {x}, {z}: {err}"));
                 continue;
             }
         };
@@ -825,11 +821,8 @@ fn apply_changes(
         let old_compression = compression_of(stored);
         let mut timestamp = old_timestamp;
         let mut compression = old_compression;
-        let (x, z) = chunk_at(region, index);
         let changed = changes.apply(
             &mut ChunkMut {
-                x,
-                z,
                 region: region_root.as_mut(),
                 entities: entities_root.as_mut(),
                 poi: poi_root.as_mut(),

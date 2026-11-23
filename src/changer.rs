@@ -45,8 +45,6 @@ use std::{
 /// One chunk position while changes are applied: its NBT in each file (None: no chunk there or
 /// the file is not needed) and its region/ header entry.
 pub struct ChunkMut<'a> {
-    pub x: i32,
-    pub z: i32,
     pub region: Option<&'a mut Compound>,
     pub entities: Option<&'a mut Compound>,
     pub poi: Option<&'a mut Compound>,
@@ -2481,8 +2479,6 @@ mod tests {
     fn run(text: &str, root: &mut Compound, force: bool) -> Changed {
         let (mut timestamp, mut compression) = (0u32, 2u8);
         let mut chunk = ChunkMut {
-            x: 0,
-            z: 0,
             region: Some(root),
             entities: None,
             poi: None,
@@ -2820,8 +2816,6 @@ mod tests {
         let (mut timestamp, mut compression) = (0u32, 2u8);
         let set = parse("DataVersion = 4325").unwrap();
         let mut chunk = ChunkMut {
-            x: 0,
-            z: 0,
             region: Some(&mut root),
             entities: Some(&mut entities),
             poi: Some(&mut poi),
@@ -2926,8 +2920,6 @@ mod tests {
         let (mut timestamp, mut compression) = (5u32, 2u8);
         let set = parse("Timestamp = 1700000000, Compression = GZIP").unwrap();
         let mut chunk = ChunkMut {
-            x: -12,
-            z: 1,
             region: Some(&mut root),
             entities: None,
             poi: None,
@@ -2950,8 +2942,6 @@ mod tests {
         // no chunk there: nothing to stamp
         let (mut timestamp, mut compression) = (5u32, 2u8);
         let mut empty = ChunkMut {
-            x: 0,
-            z: 0,
             region: None,
             entities: None,
             poi: None,
@@ -3232,8 +3222,6 @@ mod tests {
         assert_eq!(entities.list("Entities").unwrap().len(), 3);
         let (mut timestamp, mut compression) = (0u32, 2u8);
         let mut chunk = ChunkMut {
-            x: -9,
-            z: 7,
             region: None,
             entities: Some(&mut entities),
             poi: None,
@@ -3304,8 +3292,6 @@ mod tests {
             let mut entities = chunk_at(ENTITIES, 247);
             let (mut timestamp, mut compression) = (0u32, 2u8);
             let mut chunk = ChunkMut {
-                x: -9,
-                z: 7,
                 region: None,
                 entities: Some(&mut entities),
                 poi: None,

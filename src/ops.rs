@@ -396,16 +396,6 @@ impl<'a> Writer<'a> {
         })
     }
 
-    /// The operation's id.
-    pub fn id(&self) -> Uuid {
-        self.id
-    }
-
-    /// The backup folder (relative to the server root).
-    pub fn folder(&self) -> &str {
-        &self.folder
-    }
-
     async fn record(&mut self, change: FileChange) -> Result<(), ApiResponse> {
         self.files.push(change);
         db::set_operation_files(&self.map.database, self.id, &files_json(&self.files)).await?;
