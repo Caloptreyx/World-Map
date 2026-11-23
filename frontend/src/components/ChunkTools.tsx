@@ -47,9 +47,9 @@ export default function ChunkTools({ compact, opened, onClose, controls, ...prop
 
   const body = (
     <Tabs value={active} onChange={(value) => value && setTab(value as Tab)} keepMounted={false}>
-      <Tabs.List grow={compact}>
+      <Tabs.List grow>
         {shown.map(([name, label]) => (
-          <Tabs.Tab key={name} value={name} px={compact ? 6 : 10}>
+          <Tabs.Tab key={name} value={name} px={6}>
             {label}
           </Tabs.Tab>
         ))}

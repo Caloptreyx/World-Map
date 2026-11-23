@@ -305,15 +305,15 @@
   }
 }
 
-/* chunk tools: a card above the toolbar on wide screens (a bottom sheet on narrow ones) */
+/* chunk tools: the right column of the map on wide screens (a bottom sheet on narrow ones) */
 .wm-tools {
   position: absolute;
+  top: 12px;
   right: 12px;
   bottom: 68px;
   z-index: 6;
   width: 420px;
   max-width: calc(100% - 24px);
-  max-height: calc(100% - 80px);
   display: flex;
   flex-direction: column;
 }

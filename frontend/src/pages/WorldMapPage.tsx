@@ -735,7 +735,8 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
               {overviewContent}
             </FloatingPanel>
           </div>
-          <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 5 }}>
+          {/* the chunk tools take the right column while they are open */}
+          <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 5, display: toolsOpen ? 'none' : undefined }}>
             <FloatingPanel
               icon={<FontAwesomeIcon icon={faUsers} />}
               title={t('players.title', {})}
