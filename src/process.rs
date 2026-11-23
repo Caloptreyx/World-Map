@@ -1446,7 +1446,7 @@ impl ZipWriter {
             out.extend(size.to_le_bytes());
             out.extend(size.to_le_bytes());
             out.extend((name.len() as u16).to_le_bytes());
-            out.extend([0u8; 12]); // extra, comment, disk, internal attributes
+            out.extend([0u8; 8]); // extra, comment, disk, internal attributes
             out.extend(0u32.to_le_bytes()); // external attributes
             out.extend((*offset as u32).to_le_bytes());
             out.extend(name.as_bytes());
@@ -1662,6 +1662,13 @@ mod tests {
         assert_eq!(directory_offset + directory_size, bytes.len() - 22);
         assert_eq!(
             &bytes[directory_offset..directory_offset + 4],
+            &0x0201_4b50u32.to_le_bytes()
+        );
+        // central entries are 46 bytes plus the name; the second follows the first
+        assert_eq!(directory_size, 46 + 16 + 46 + 13);
+        assert_eq!(&bytes[directory_offset + 46..directory_offset + 62], b"region/r.0.0.mca");
+        assert_eq!(
+            &bytes[directory_offset + 62..directory_offset + 66],
             &0x0201_4b50u32.to_le_bytes()
         );
         // the first local entry holds the data stored, with its CRC-32
