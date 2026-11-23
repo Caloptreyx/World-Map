@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.1.3
+
+- Chunk tools after [MCA Selector](https://github.com/Querz/mcaselector) (same names, query syntax
+  and selection files), in a new "Chunk tools" card (bottom sheet on phones):
+  - **Selection**: whole regions as well as chunks (region mode, automatic when zoomed far out),
+    Alt-drag or the Remove switch to unselect, select all, invert (within the regions that exist),
+    clear; save, open, copy and paste selections as MCA Selector CSV files (replace, merge or
+    subtract).
+  - **Filter chunks**: a builder with AND/OR groups and negation, synced with a query box in MCA
+    Selector's syntax (`InhabitedTime < "5 minutes" AND Status != "full"`): InhabitedTime,
+    LastUpdate, DataVersion, Status, Biome, Palette, Entities, #Entities, #ProtoEntities,
+    #TileEntities, Structures, xPos/yPos/zPos, Circle, Border, Timestamp, Compression,
+    LightPopulated, plus `Size` (compressed chunk size). Runs as a background job with progress and
+    cancel, then shows the count: select the matches, add them to the selection or delete them.
+  - **Overlays** (layers menu): InhabitedTime, LastUpdate, Timestamp, DataVersion, #Entities,
+    #TileEntities, AverageHeight, #Blocks and Size, with min/max, gradient and legend; computed per
+    region and cached like the tiles.
+  - **Change fields** on the selected chunks: Status, FixStatus, InhabitedTime, LastUpdate,
+    Timestamp, DataVersion, Compression, Biome, ReplaceBlocks, DeleteEntities, DeleteSections,
+    FixHeightmaps, DeleteStructureReference, PreventRetrogen, ForceBlend, RemoveLightingInfo,
+    LightPopulated, with MCA Selector's "force".
+  - **Copy and import**: copy the selected chunks to another world or dimension of the server, or
+    import from one, with an x/z (chunk) and y (section) offset, overwrite or skip, section ranges
+    and "only into the selection"; import uploaded region files or a zip; download the selection as
+    a zip of `region/`, `entities/` and `poi/` files. Chunk, entity, block entity, tick, structure
+    and point-of-interest coordinates move with the chunks.
+  - **History**: every write is an operation with a backup; restore the latest one in one click.
+- Safe writes for every change (chunk deletion included): only while the server is stopped
+  (checked again, uncached, before every file), the original file is moved into
+  `.worldmap-backups/<time>-<kind>-<id>/` first, the new file is written next to it and renamed
+  into place, so a file is never half-written. `region/`, `entities/` and `poi/` files are changed
+  together; unchanged chunks are kept byte for byte with their compression and timestamps;
+  oversized chunks (`.mcc` files) are read and written as the game does. Backups are deleted after
+  a retention period (admin setting, default 7 days).
+- New `world-map.edit-chunks` and `world-map.import-chunks` permissions. Writes now also need the
+  core `files.create` and `files.update` permissions (deleting chunks `files.delete` too), zip
+  uploads `files.archive`.
+- Admin setting "Days to keep chunk backups"; "most chunks per deletion" now limits every chunk
+  operation.
+
 ## 0.1.2
 
 - Online and offline players: each player is marked online or offline from the server itself

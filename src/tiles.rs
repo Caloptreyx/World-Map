@@ -32,6 +32,15 @@ pub fn variant(ceiling: Option<i32>) -> String {
     }
 }
 
+/// A panel-wide work slot for reading and processing one region file, shared by tile rendering,
+/// overlays and chunk tool jobs: `concurrency` regions at a time (the render setting).
+pub async fn slot(concurrency: u32) -> Result<tokio::sync::SemaphorePermit<'static>, ApiResponse> {
+    RENDERING
+        .acquire_many(PERMITS / concurrency.clamp(1, PERMITS))
+        .await
+        .map_err(|_| ApiResponse::error("the renderer is shutting down"))
+}
+
 fn current(tile: &Tile, file: &RegionFile, variant: &str) -> bool {
     tile.modified == file.modified && tile.size == file.size as i64 && tile.variant == variant
 }
@@ -67,11 +76,7 @@ pub async fn png(
         {
             return Ok(tile.image);
         }
-        let share = PERMITS / map.settings.render_concurrency.clamp(1, PERMITS);
-        let _slot = RENDERING
-            .acquire_many(share)
-            .await
-            .map_err(|_| ApiResponse::error("the renderer is shutting down"))?;
+        let _slot = slot(map.settings.render_concurrency).await?;
         let data = map
             .read(path, map.region_limit())
             .await?

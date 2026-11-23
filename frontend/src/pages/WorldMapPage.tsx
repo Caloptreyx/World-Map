@@ -4,12 +4,13 @@ import {
   faGear,
   faLocationArrow,
   faLocationDot,
+  faToolbox,
   faTrash,
   faUsers,
 } from '@fortawesome/free-solid-svg-icons';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { useDebouncedValue, useMediaQuery } from '@mantine/hooks';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { httpErrorToHuman } from '@/api/axios.ts';
 import ActionIcon from '@/elements/buttons/ActionIcon.tsx';
@@ -26,10 +27,10 @@ import Text from '@/elements/typography/Text.tsx';
 import { useToast } from '@/providers/ToastProvider.tsx';
 import { useServerStore } from '@/stores/server.ts';
 import {
-  deleteChunks,
   getEntities,
   getHeatmap,
   getOnline,
+  getOverlay,
   getOverview,
   getPlayers,
   getRegions,
@@ -41,19 +42,24 @@ import {
   teleport,
   type TeleportTarget,
 } from '../api.ts';
+import ChunkTools from '../components/ChunkTools.tsx';
 import FloatingPanel from '../components/FloatingPanel.tsx';
-import MapCanvas, { type Layers, type TileStatus } from '../components/MapCanvas.tsx';
+import { jobSummary } from '../components/JobProgress.tsx';
+import MapCanvas, { type Layers, type OverlayCells, type TileStatus } from '../components/MapCanvas.tsx';
+import OverlayLegend from '../components/OverlayLegend.tsx';
+import { DEFAULT_OVERLAY, type OverlayChoice, overlayBound, overlayReady } from '../components/OverlaySettings.tsx';
 import OverviewContent, { placeLabel } from '../components/OverviewCard.tsx';
 import PlayersContent, { avatarUrl, playerLabel } from '../components/PlayerCard.tsx';
 import PlayerVisibilityModal from '../components/PlayerVisibilityModal.tsx';
 import Toolbar from '../components/Toolbar.tsx';
+import { type Brush, type Granularity, SelectionControls } from '../components/toolsCommon.tsx';
+import { useChunkJobs } from '../components/useChunkJob.ts';
 import WorldsModal from '../components/WorldsModal.tsx';
 import {
-  type ChunkRect,
+  CHUNK_BLOCKS,
   chunkOf,
+  MAX_TILE_REQUESTS,
   regionOf,
-  selectedChunks,
-  selectionText,
   type Size,
   toScreen,
   type View,
@@ -61,6 +67,7 @@ import {
   visibleRegions,
 } from '../lib/geometry.ts';
 import { effectiveLayers, isOnline, restoreLayers, shownPlayers, whyNoPlayers } from '../lib/players.ts';
+import { count, emptySelection, isEmpty, regionKey, type Selection } from '../lib/selection.ts';
 import { emptyReason, findPlace, initialPlace, showsSpawn } from '../lib/worlds.ts';
 import { useExtTranslations } from '../translations.ts';
 
@@ -74,11 +81,14 @@ const DEFAULT_LAYERS: Layers = {
 };
 /** Below this map width the panels become sheets and the toolbar folds its layers into a menu. */
 const COMPACT_WIDTH = 900;
+/** Below this many screen pixels per chunk, clicks and drags select whole regions. */
+const AUTO_REGION_PIXELS = 4;
 
 interface Saved {
   place: Place;
   view: View;
   layers: Layers;
+  overlay: OverlayChoice;
 }
 
 const storageKey = (server: string) => `${PACKAGE}:view:${server}`;
@@ -194,14 +204,17 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
   // the viewer's choice; `drawn` below also applies the server's player setting
   const [layers, setLayers] = useState<Layers>(() => restoreLayers(DEFAULT_LAYERS, saved.layers));
   const [selecting, setSelecting] = useState(false);
-  const [selection, setSelection] = useState<ChunkRect[]>([]);
+  const [selection, setSelection] = useState<Selection>(emptySelection);
+  const [granularity, setGranularity] = useState<Granularity>('chunk');
+  const [brush, setBrush] = useState<Brush>('add');
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const [overlay, setOverlay] = useState<OverlayChoice>(() => ({ ...DEFAULT_OVERLAY, ...saved.overlay }));
   const [cursor, setCursor] = useState<[number, number] | null>(null);
   const [selectedUuid, setSelectedUuid] = useState<string | null>(null);
   const [picking, setPicking] = useState<Player | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [sheet, setSheet] = useState<Sheet>(null);
   const [tileStatus, setTileStatus] = useState<TileStatus>({ loading: 0, skipped: 0, error: null });
-  const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [foldersOpen, setFoldersOpen] = useState(false);
@@ -212,8 +225,8 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
   const compact = size.width > 0 && size.width < COMPACT_WIDTH;
 
   useEffect(() => {
-    localStorage.setItem(storageKey(server), JSON.stringify({ place, view, layers } satisfies Saved));
-  }, [server, place, view, layers]);
+    localStorage.setItem(storageKey(server), JSON.stringify({ place, view, layers, overlay } satisfies Saved));
+  }, [server, place, view, layers, overlay]);
 
   // the world or dimension went away (folders or level-name changed): back to one that exists
   useEffect(() => {
@@ -236,7 +249,10 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
       if (event.key !== 'Escape') return;
       setMenu(null);
       setPicking(null);
-      setSelection([]);
+      // Esc in a field or a dialog closes that, it does not throw the selection away
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('input, textarea, select, [role="dialog"]')) return;
+      setSelection(emptySelection());
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -247,6 +263,17 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
     queryFn: () => getRegions(server, place),
     refetchInterval: 60_000,
   });
+  const regionFiles = regions.data?.regions;
+  // regions with any file: what inverted selections, counts and overlays cover
+  const existing = useMemo<[number, number][]>(
+    () => [
+      ...(regions.data?.regions ?? []).map((region): [number, number] => [region.x, region.z]),
+      ...(regions.data?.others ?? []),
+    ],
+    [regions.data],
+  );
+  const existingKeys = useMemo(() => new Set(existing.map(([x, z]) => regionKey(x, z))), [existing]);
+  const jobs = useChunkJobs(server);
   const visibility = overview.player_visibility;
   const players = useQuery({
     // refetched when the server starts or stops: who is online changes with it
@@ -302,7 +329,65 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
   const spawnHere = !!current && showsSpawn(current.world, place.dimension);
   // the server must load this world under a known key to teleport into it
   const canTeleportHere = !!current?.dimension.key;
-  const chunkCount = useMemo(() => selectedChunks(selection), [selection]);
+  const chunkCount = useMemo(() => count(selection, existing), [selection, existing]);
+  const autoRegion = CHUNK_BLOCKS * view.zoom < AUTO_REGION_PIXELS;
+  const regionMode = autoRegion || granularity === 'region';
+
+  // overlay values per region on screen, like tiles: only while few regions are visible
+  const overlayOn = overlayReady(overlay);
+  const overlayRegions = useMemo(() => {
+    if (!overlayOn || size.width === 0) return [];
+    const visible = visibleRegions(settled, size).filter(([x, z]) => existingKeys.has(regionKey(x, z)));
+    return visible.length > MAX_TILE_REQUESTS ? null : visible;
+  }, [overlayOn, settled, size, existingKeys]);
+  const modified = useMemo(
+    () =>
+      new Map(
+        (regionFiles ?? []).map((region) => [regionKey(region.x, region.z), `${region.modified}-${region.size}`]),
+      ),
+    [regionFiles],
+  );
+  const overlayResults = useQueries({
+    queries: (overlayRegions ?? []).map(([x, z]) => ({
+      queryKey: [
+        PACKAGE,
+        server,
+        'overlay',
+        place.world,
+        place.dimension,
+        overlay.type,
+        overlay.parameter,
+        x,
+        z,
+        modified.get(regionKey(x, z)) ?? '',
+      ],
+      queryFn: () => getOverlay(server, place, x, z, overlay.type, overlay.parameter.trim() || null),
+      staleTime: 5 * 60_000,
+      retry: false,
+    })),
+  });
+  const overlayStamp = overlayResults.map((result) => `${result.dataUpdatedAt}`).join(',');
+  const overlayLoading = overlayResults.filter((result) => result.isLoading).length;
+  const overlayError = overlayResults.find((result) => result.error)?.error ?? null;
+  const minBound = overlayBound(overlay, overlay.min);
+  const maxBound = overlayBound(overlay, overlay.max);
+  const overlayCells = useMemo<OverlayCells | null>(() => {
+    if (!overlayOn || !overlayRegions) return null;
+    const cells = new Map<string, (number | null)[]>();
+    let low = Number.POSITIVE_INFINITY;
+    let high = Number.NEGATIVE_INFINITY;
+    overlayRegions.forEach(([x, z], index) => {
+      const data = overlayResults[index]?.data;
+      if (!data) return;
+      cells.set(regionKey(x, z), data.values);
+      if (data.min !== null) low = Math.min(low, data.min);
+      if (data.max !== null) high = Math.max(high, data.max);
+    });
+    const min = typeof minBound === 'number' ? minBound : low;
+    const max = typeof maxBound === 'number' ? maxBound : high;
+    if (!Number.isFinite(min) || !Number.isFinite(max)) return cells.size > 0 ? { cells, min: 0, max: 0 } : null;
+    return { cells, min, max };
+  }, [overlayOn, overlayRegions, overlayStamp, minBound, maxBound]);
   const onlineCount = allPlayers.filter((player) => isOnline(player, onlineNow)).length;
   const offlineCount = allPlayers.length - onlineCount;
   const noPlayers = whyNoPlayers(visibility, drawn);
@@ -318,7 +403,7 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
       setView((now) => ({ x: targetSpawn ? targetSpawn[0] : 0, z: targetSpawn ? targetSpawn[2] : 0, zoom: now.zoom }));
     }
     setPlace(target);
-    setSelection([]);
+    setSelection(emptySelection());
   };
   const locate = (player: Player) => {
     goTo(player, player.x, player.z, Math.max(view.zoom, 2));
@@ -366,18 +451,19 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
     }
   };
 
-  const runDelete = async () => {
-    try {
-      const result = await deleteChunks(server, place, selection);
-      addToast(t('selection.deleted', { deleted: result.deleted, files: result.files }), 'success');
-      setSelection([]);
-      setConfirmDelete(false);
-      queryClient.invalidateQueries({ queryKey: [PACKAGE, server, 'regions'] });
-      queryClient.invalidateQueries({ queryKey: [PACKAGE, server, 'entities'] });
-    } catch (error) {
-      addToast(httpErrorToHuman(error), 'error');
-    }
+  const toggleTools = () => {
+    setToolsOpen((open) => !open);
+    setSheet(null);
   };
+  const selectionControls = (
+    <SelectionControls
+      granularity={granularity}
+      autoRegion={autoRegion}
+      onGranularity={setGranularity}
+      brush={brush}
+      onBrush={setBrush}
+    />
+  );
 
   const runReset = async () => {
     try {
@@ -391,7 +477,6 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
   };
 
   const marker = (x: number, z: number) => toScreen(view, size, x, z);
-  const tooManyChunks = chunkCount > overview.limits.delete_chunks;
   const notices = [
     tileStatus.loading > 0 ? t('map.loading', { count: tileStatus.loading }) : null,
     tileStatus.skipped > 0 ? t('map.zoomInTiles', {}) : null,
@@ -401,13 +486,17 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
     layers.heatmap && heat.data && heat.data.max === 0
       ? t(overview.heatmap.enabled ? 'heatmap.empty' : 'heatmap.disabled', {})
       : null,
+    overlayOn && overlayRegions === null ? t('overlay.zoomIn', {}) : null,
+    overlayOn && overlayLoading > 0 ? t('overlay.loading', { count: overlayLoading }) : null,
+    overlayError ? t('overlay.failed', { error: httpErrorToHuman(overlayError) }) : null,
+    jobs.job && (!toolsOpen || compact) && jobs.job.state === 'running' ? jobSummary(t, jobs.job) : null,
   ].filter((notice): notice is string => !!notice);
 
   const overviewContent = (
     <OverviewContent
       overview={overview}
       place={place}
-      regions={regions.data?.length ?? null}
+      regions={regionFiles?.length ?? null}
       onPlace={(target) => {
         changePlace(target);
         setSheet(null);
@@ -522,16 +611,20 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
       <MapCanvas
         server={server}
         place={place}
-        regions={regions.data ?? []}
+        regions={regionFiles ?? []}
+        existing={existing}
         view={view}
         size={size}
         onView={setView}
         layers={layers}
         heat={layers.heatmap ? (heat.data ?? null) : null}
+        overlay={overlayCells}
         entities={entityArea ? (entities.data?.entities ?? []) : []}
         selecting={selecting}
         selection={selection}
         onSelection={setSelection}
+        regionMode={regionMode}
+        brush={brush}
         picking={!!picking}
         onPick={(x, z) => {
           if (picking) teleportHere(picking, x, z);
@@ -543,7 +636,7 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
         onTiles={setTileStatus}
       />
 
-      {regions.data && regions.data.length === 0 && (
+      {regionFiles && regionFiles.length === 0 && (
         <div className='wm-empty'>
           <div className='wm-glass'>
             <Text size='sm' fw={600}>
@@ -698,6 +791,14 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
               <Text size='xs'>{notice}</Text>
             </div>
           ))}
+          {overlayCells && overlayCells.cells.size > 0 && (
+            <OverlayLegend
+              type={overlay.type}
+              parameter={overlay.parameter}
+              min={overlayCells.min}
+              max={overlayCells.max}
+            />
+          )}
           {layers.heatmap && heat.data && heat.data.max > 0 && (
             <div className='wm-glass' style={{ padding: '6px 10px', width: 190 }}>
               <Text className='wm-label'>{t('heatmap.legend', { days: heat.data.days })}</Text>
@@ -758,10 +859,14 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
             goTo({ world: world.name, dimension: world.dimensions[0].id }, home ? home[0] : 0, home ? home[2] : 0);
           }}
           heatmapDays={overview.heatmap.retention_days}
+          toolsOpen={toolsOpen}
+          onTools={toggleTools}
+          overlay={overlay}
+          onOverlay={setOverlay}
         />
       </div>
 
-      {(selecting || picking) && (
+      {(picking || (selecting && (compact || !toolsOpen))) && (
         <div
           style={
             compact
@@ -780,48 +885,51 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
           <div className='wm-glass' style={{ padding: '8px 12px' }}>
             {picking ? (
               <Text size='sm'>{t('players.teleportHint', { name: playerLabel(picking) })}</Text>
-            ) : selection.length === 0 ? (
-              <Text size='sm'>{compact ? t('selection.hintTouch', {}) : t('selection.hint', {})}</Text>
             ) : (
-              <Group gap='sm'>
-                <Text size='sm' fw={600}>
-                  {t('selection.count', { count: chunkCount })}
+              <Stack gap={6}>
+                <Text size='sm' fw={isEmpty(selection) ? undefined : 600}>
+                  {isEmpty(selection)
+                    ? compact
+                      ? t('selection.hintTouch', {})
+                      : t('selection.hint', {})
+                    : t('selection.count', { count: chunkCount })}
                 </Text>
-                <Group gap={6}>
+                <Group gap={6} wrap='wrap'>
+                  {selectionControls}
+                  {!isEmpty(selection) && (
+                    <Button size='xs' variant='subtle' onClick={() => setSelection(emptySelection())}>
+                      {t('selection.clear', {})}
+                    </Button>
+                  )}
                   <Button
                     size='xs'
                     variant='default'
-                    leftSection={<FontAwesomeIcon icon={faCopy} />}
-                    onClick={() => copy(selectionText(selection))}
+                    leftSection={<FontAwesomeIcon icon={faToolbox} />}
+                    onClick={toggleTools}
                   >
-                    {t('selection.copy', {})}
-                  </Button>
-                  {overview.capabilities.delete_chunks && (
-                    <Button
-                      size='xs'
-                      color='red'
-                      disabled={power !== 'offline' || tooManyChunks}
-                      onClick={() => setConfirmDelete(true)}
-                    >
-                      {t('selection.delete', {})}
-                    </Button>
-                  )}
-                  <Button size='xs' variant='subtle' onClick={() => setSelection([])}>
-                    {t('selection.clear', {})}
+                    {t('tools.open', {})}
                   </Button>
                 </Group>
-                {overview.capabilities.delete_chunks && (power !== 'offline' || tooManyChunks) && (
-                  <Text size='xs' c='dimmed'>
-                    {power !== 'offline'
-                      ? t('selection.deleteOnline', {})
-                      : t('selection.tooMany', { limit: overview.limits.delete_chunks })}
-                  </Text>
-                )}
-              </Group>
+              </Stack>
             )}
           </div>
         </div>
       )}
+
+      <ChunkTools
+        compact={compact}
+        opened={toolsOpen}
+        onClose={() => setToolsOpen(false)}
+        controls={selectionControls}
+        server={server}
+        overview={overview}
+        place={place}
+        selection={selection}
+        onSelection={setSelection}
+        existing={existing}
+        offline={power === 'offline'}
+        jobs={jobs}
+      />
 
       {menu && (
         <>
@@ -872,21 +980,6 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
           </div>
         </>
       )}
-
-      <ConfirmationModal
-        opened={confirmDelete}
-        onClose={() => setConfirmDelete(false)}
-        title={t('selection.deleteTitle', {})}
-        confirm={t('selection.delete', {})}
-        onConfirmed={runDelete}
-      >
-        <Stack gap='sm'>
-          <Text size='sm'>
-            {t('selection.deleteContent', { count: chunkCount, place: placeLabel(t, overview, place) })}
-          </Text>
-          <Alert color='yellow'>{t('selection.backup', {})}</Alert>
-        </Stack>
-      </ConfirmationModal>
 
       <ConfirmationModal
         opened={confirmReset}

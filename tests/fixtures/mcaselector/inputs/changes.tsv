@@ -1,0 +1,4 @@
+inhabited-lastupdate	InhabitedTime = 1200, LastUpdate = 0
+status	Status = "empty"
+delete-sections	DeleteSections = "4:"
+delete-entities	DeleteEntities = true

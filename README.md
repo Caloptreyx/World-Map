@@ -2,7 +2,8 @@
 
 A [Calagopus Panel](https://calagopus.com) extension that adds a **World Map** page to Minecraft
 Java servers: a top-down map of the world, drawn from the server's own files, with players, mobs
-and entities, a player heatmap, chunk selection and deletion, and teleports.
+and entities, a player heatmap, teleports, and MCA Selector's chunk tools (filters, overlays,
+chunk editing, import/export) with backups.
 
 Package name: `dev.caloptreyx.worldmap` · Requires panel `>=1.2.10`
 
@@ -23,8 +24,9 @@ Package name: `dev.caloptreyx.worldmap` · Requires panel `>=1.2.10`
   other entities (vehicles, items, armor stands...). The help button opens a legend.
 - **Heatmap** of where players spend their time, from position samples kept for a configurable
   number of days.
-- **Chunk tools**: select chunks (drag rectangles, Shift adds, a click toggles one chunk), copy
-  their coordinates, and delete them while the server is stopped so they generate again.
+- **Chunk tools** after MCA Selector: select chunks or regions, filter chunks with its queries,
+  colour them with overlays, change their NBT fields, delete, copy and import them with offsets,
+  download them as a zip, with a backup and one-click restore of every change (see below).
 - **Cursor** readout with the block, chunk and region under the mouse; right-click to copy
   coordinates or teleport the selected player there.
 - **Phones and tablets** (map narrower than 900 px): the panels open as bottom sheets from two
@@ -177,8 +179,8 @@ their last saved position; `enable-query=true` closes that gap.
 | before 1.13 | Not drawn: a message asks to open the world with a newer version |
 
 Region compression: gzip, zlib (default), uncompressed and LZ4 (`region-file-compression=lz4`).
-Chunks still being generated are left out; chunks stored in external `.mcc` files (over 1 MiB) are
-skipped.
+Chunks still being generated are left out of the map; chunks stored in external `.mcc` files (over
+1 MiB) are not drawn, but the chunk tools read, filter, change, copy and export them.
 
 ## Permissions
 
@@ -187,7 +189,11 @@ The page and every endpoint check the acting user's server permissions through t
 | Action | Needs |
 |---|---|
 | View the map, players, entities, heatmap | `world-map.view` + `files.read-content` |
-| Delete chunks | `world-map.view`, `files.read-content`, `world-map.delete-chunks`, `files.update`; server stopped |
+| Delete chunks (selection or filter matches) | `world-map.view`, `files.read-content`, `world-map.delete-chunks`, `files.create`, `files.update`, `files.delete`; server stopped |
+| Change chunk fields | `world-map.view`, `files.read-content`, `world-map.edit-chunks`, `files.create`, `files.update`; server stopped |
+| Copy chunks to another world, import chunks (also uploads) | `world-map.view`, `files.read-content`, `world-map.import-chunks`, `files.create`, `files.update`; server stopped (uploading a zip also `files.archive`) |
+| Filters, overlays, selection files, download the selection as a zip | `world-map.view` + `files.read-content` |
+| Restore an operation | the permissions of the action that made it; server stopped |
 | Teleport | `world-map.view`, `world-map.teleport`, `control.console`; server running |
 | Reset the heatmap | `world-map.view`, `world-map.reset-heatmap` |
 | Add world folders | `world-map.view`, `files.read-content`, `world-map.manage-worlds` |
@@ -195,9 +201,10 @@ The page and every endpoint check the acting user's server permissions through t
 
 Server owners and admins have all of them; give the `world-map.*` permissions to subusers like any
 other permission. The console fallback for online players also needs `control.read-console`.
-Every write is logged: `server:file.write` per rewritten region file,
-`server:worldmap.delete-chunks`, `server:console.command` for teleports and `list`,
-`server:worldmap.reset-heatmap`, `server:worldmap.update-worlds`,
+Every write is logged: `server:worldmap.delete-chunks`, `server:worldmap.change-chunks`,
+`server:worldmap.import-chunks`, `server:worldmap.restore` (each with the chunk and file counts and
+the backup folder), `server:worldmap.export-chunks`, `server:console.command` for teleports and
+`list`, `server:worldmap.reset-heatmap`, `server:worldmap.update-worlds`,
 `server:worldmap.update-player-visibility`.
 
 ## Admin settings
@@ -207,20 +214,81 @@ Every write is logged: `server:file.write` per rewritten region file,
 - **Eggs**: only servers of these eggs get the map (empty: every server with a
   `server.properties` that is not Bedrock).
 - **Heatmap**: on/off, minutes between samples (default 5), days to keep (default 30).
-- **Rendering**: largest region file read (default 64 MiB), regions rendered at once (default 2),
-  Nether ceiling (default 100), most entities per view (default 5000), most chunks per deletion
-  (default 65 536), tile cache size (default 2048 MiB; least recently viewed tiles are pruned
-  hourly).
+- **Rendering**: largest region file read (default 64 MiB), regions rendered at once (default 2,
+  also how many regions chunk tool jobs and overlays read at once), Nether ceiling (default 100),
+  most entities per view (default 5000), most chunks one chunk operation may touch (default
+  65 536), tile cache size (default 2048 MiB; least recently viewed tiles are pruned hourly).
+- **Chunk backups**: days to keep the backups of chunk operations (default 7).
 
-## Chunk deletion
+## Chunk tools
 
-Deleting rewrites the region files of the selected chunks without them (in `region/`, and in
-`entities/` and `poi/` so no old mobs or villager workstations stay behind); the other chunks are
-kept byte for byte. It only runs while the server is offline (checked again before every file;
-the state comes from the node's status report the panel itself shows, which can be up to 15
-seconds old, so do not start the server while a deletion runs), after a confirmation naming the
-count. The game generates the chunks again when they next load. Wings keeps a revision of each
-rewritten file, but **make a backup first**.
+The "Chunk tools" toolbar button opens a card (a bottom sheet on phones) with the features of
+[MCA Selector](https://github.com/Querz/mcaselector), using its names, its query syntax and its
+selection files, so selections and queries move between the two.
+
+- **Selection**: chunks or whole regions (the region mode switches on by itself when chunks are
+  smaller than 4 px). Drag adds a rectangle, Alt-drag (or the Remove switch) removes one, a click
+  toggles. Select all, invert and clear work like MCA Selector: an inverted selection means every
+  chunk of the regions that exist except the unselected ones. Selections are saved and opened as
+  MCA Selector CSV files (`inverted` first line, `rx;rz` for a whole region, `rx;rz;cx;cz` for a
+  chunk), copied and pasted as that text, and loaded to replace, merge with or subtract from the
+  current one.
+- **Filter chunks**: a builder (AND/OR groups, negated groups) kept in sync with a query box in
+  MCA Selector's syntax, for example `InhabitedTime < "5 minutes" AND Status != "full"`. Fields:
+  `DataVersion`, `InhabitedTime`, `LastUpdate`, `Timestamp`, `xPos`, `yPos`, `zPos`, `Status`,
+  `Biome`, `Palette`, `Entities`, `#Entities`, `#ProtoEntities`, `#TileEntities`, `Structures`,
+  `LightPopulated`, `Compression`, `Circle`, `Border`, and World Map's `Size` (compressed chunk
+  size). `PlayerLocation`, `PlayerSpawn`, `Selection`, `Custom` and `Script` are not available.
+  A filter runs as a background job over every region file of the dimension (or only the
+  selection), one region at a time, with progress and cancel; it then shows how many chunks match
+  and offers to select them, add them to the selection or delete them. As in MCA Selector, chunk
+  positions without a chunk can match (`InhabitedTime < 10`, `Circle`); selecting them is harmless.
+- **Overlays** (layers menu): `InhabitedTime`, `LastUpdate`, `Timestamp`, `DataVersion`,
+  `#Entities`, `#TileEntities`, `AverageHeight`, `#Blocks` (with block names) and `Size`, coloured
+  per chunk from a min/max (empty: the range of what is shown) with a legend. Values are computed
+  per region and cached in the database while the region (and entities) file keeps its size and
+  time, like the tiles.
+- **Change fields** of the selected chunks (MCA Selector's "Change fields" with its syntax, for
+  example `InhabitedTime = 0, Status = "minecraft:full"`): `Status`, `FixStatus`,
+  `InhabitedTime`, `LastUpdate`, `Timestamp`, `DataVersion`, `Compression`, `Biome`,
+  `ReplaceBlocks`, `DeleteEntities`, `DeleteSections`, `FixHeightmaps`,
+  `DeleteStructureReference`, `PreventRetrogen`, `ForceBlend`, `RemoveLightingInfo`,
+  `LightPopulated`, and "Force" to set fields a chunk does not have. Unlike MCA Selector 2.9,
+  `DeleteEntities` also empties the `entities/` files of 1.17+ worlds.
+- **Copy and import** (MCA Selector's "Import chunks"): copy the selected chunks to another world or
+  dimension of the server, or import from one, with an offset in chunks (x, z) and sections (y),
+  overwrite or keep existing chunks, section ranges (`-4:3,10`), and optionally only into the
+  selected chunks. Coordinates inside the chunks move with them (chunk position, sections, block
+  entities, ticks, structures, entities with new UUIDs, points of interest). A world from
+  elsewhere: upload `.mca` files or a zip (with `region/`, `entities/`, `poi/` folders, also inside
+  a world folder) through the panel's upload; it is staged in `.worldmap-imports/` and removed after
+  the import. **Download as zip** streams the selected chunks as a zip of region files (the
+  `region/`, `entities/` and `poi/` folders of a world).
+- **History**: every write (deleting, changing, importing, restoring) is an operation with its
+  backup; the latest one is restored in one click.
+
+### Safe writes
+
+- Chunk operations only run while the server is **stopped**, and check that again (uncached)
+  before every file they write; a server that starts stops the operation.
+- **Backup first**: before a file is changed, the original is moved (renamed, no copy) into
+  `.worldmap-backups/<YYYYMMDD-HHMMSS>-<kind>-<id>/<its path>`, with a `worldmap-operation.json`
+  manifest. The panel's backups are not used: they archive the whole server, take long, count
+  against the backup limit and restore all or nothing.
+- **Atomic per file**: the new file is written next to the original as `.<name>.worldmap-tmp` and
+  renamed into place once complete, so a crash never leaves a half-written region file (at worst a
+  file is missing and its backup is there). Wings' own writes overwrite in place, so this is done
+  with its rename.
+- `region/`, `entities/` and `poi/` files are changed together, as MCA Selector does. Unchanged
+  chunks keep their bytes, compression and timestamp; region headers are written fresh and
+  compact. Chunks over 1 MiB go to `c.<x>.<z>.mcc` files as the game does.
+- **Restore** moves the backups back and sets the files the operation wrote aside in
+  `<backup>/replaced/`. Only operations no newer operation touched the same files of can be
+  restored. Backups are deleted after the retention setting (default 7 days), upload staging
+  folders after a day.
+- Jobs run in the panel's memory: one write job per server at a time, regions read one at a time
+  within the panel-wide "regions rendered at once" limit. Restarting the panel stops running jobs;
+  what they wrote so far stays restorable from the history.
 
 ## Limits
 
@@ -243,8 +311,12 @@ rewritten file, but **make a backup first**.
 Below `/api/client/servers/{server}/world-map`: `GET /` (worlds, spawn, capabilities, player
 setting), `GET /regions`, `GET /tile` (PNG), `GET /players` (positions, who is online),
 `GET /online` (names, for teleports), `GET /entities`, `GET|DELETE /heatmap`,
-`POST /chunks/delete`, `POST /teleport`, `PUT /worlds` (folders added by hand),
-`PUT /players/visibility` (`{"online": bool, "offline": bool}`). Admin:
+`POST /teleport`, `PUT /worlds` (folders added by hand), `PUT /players/visibility`
+(`{"online": bool, "offline": bool}`). Chunk tools: `POST /filter/check`, `POST /changes/check`,
+`GET|POST /jobs` (`kind`: `filter`, `delete`, `change`, `import`), `GET /jobs/{id}`,
+`POST /jobs/{id}/cancel`, `GET /overlay`, `POST /export` (zip), `POST /imports`,
+`POST /imports/extract`, `GET /operations`, `POST /operations/{id}/restore`. Selections travel as
+`{"inverted": bool, "regions": [{"x", "z", "chunks": null | base64 of a 1024-bit set}]}`. Admin:
 `GET|PUT /api/admin/extensions/dev.caloptreyx.worldmap/settings`.
 
 ## Development

@@ -168,7 +168,7 @@ fn kind(name: &str) -> Kind {
 
 /// The block names of a palette: `{Name, Properties}` entries before 26.x; since then plain
 /// strings or `{id, properties}`, with strings wrapped as `{"": name}` when a list mixes both.
-fn palette_names(entries: &[Tag]) -> Option<Vec<&str>> {
+pub(crate) fn palette_names(entries: &[Tag]) -> Option<Vec<&str>> {
     entries
         .iter()
         .map(|entry| match entry {

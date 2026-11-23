@@ -1,0 +1,23 @@
+xpos-zpos	xPos >= 0 AND zPos < 0
+inhabited-lt-1min	InhabitedTime < "1 minute"
+inhabited-gt-0	InhabitedTime > 0
+status-full	Status = "minecraft:full"
+status-or-unnamespaced	Status = "carvers" OR Status = "biomes"
+not-group	!(Status = "minecraft:structure_starts") AND xPos < -5
+palette-contains	Palette contains "minecraft:water"
+palette-contains-all	Palette contains "minecraft:sand,minecraft:lapis_ore"
+palette-intersects	Palette intersects "minecraft:bedrock,minecraft:glow_lichen"
+palette-equals	Palette = "minecraft:air"
+biome-contains	Biome contains "minecraft:river"
+biome-intersects	Biome intersects "minecraft:warm_ocean,minecraft:river"
+entities-amount	#Entities > 0
+entities-contains	Entities contains "minecraft:rabbit"
+proto-entities-amount	#ProtoEntities > 0
+tile-entities-amount	#TileEntities > 0
+lastupdate-and-or	LastUpdate > 1000000 AND (xPos = -10 OR zPos = 7)
+structures-contains	Structures contains "minecraft:shipwreck"
+circle	Circle contains "-8;4;3"
+dataversion	DataVersion = 4189
+lightpopulated	LightPopulated = 0
+timestamp	Timestamp > "2026-10-01"
+compression	Compression = "zlib"

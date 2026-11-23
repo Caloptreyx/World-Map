@@ -1,5 +1,5 @@
 import { axiosInstance } from '@/api/axios.ts';
-import type { ChunkRect } from './lib/geometry.ts';
+import type { WireSelection } from './lib/selection.ts';
 
 // The backend's payloads keep their snake_case names.
 
@@ -55,6 +55,12 @@ export interface Overview {
   power: Power;
   capabilities: {
     delete_chunks: boolean;
+    /** Change NBT fields. */
+    edit_chunks: boolean;
+    /** Copy chunks between worlds and import uploaded region files. */
+    import_chunks: boolean;
+    /** Download selected chunks as a zip. */
+    export_chunks: boolean;
     teleport: boolean;
     reset_heatmap: boolean;
     manage_worlds: boolean;
@@ -68,9 +74,15 @@ export interface Overview {
     retention_days: number;
   };
   limits: {
-    delete_chunks: number;
+    /** Most chunks one write operation (delete, change, import) may touch. */
+    operation_chunks: number;
     entity_regions: number;
     extra_worlds: number;
+  };
+  /** Where write operations move the original files, and for how long they are kept. */
+  backups: {
+    retention_days: number;
+    folder: string;
   };
 }
 
@@ -159,12 +171,19 @@ export interface Settings {
   entity_limit: number;
   max_delete_chunks: number;
   tile_cache_mb: number;
+  backup_retention_days: number;
 }
 
 export const getOverview = async (server: string): Promise<Overview> => (await axiosInstance.get(base(server))).data;
 
-export const getRegions = async (server: string, place: Place): Promise<RegionFile[]> =>
-  (await axiosInstance.get(`${base(server)}/regions`, { params: place })).data.regions;
+/** The region files of a dimension, plus regions that only have entities/ or poi/ files. */
+export interface Regions {
+  regions: RegionFile[];
+  others: [number, number][];
+}
+
+export const getRegions = async (server: string, place: Place): Promise<Regions> =>
+  (await axiosInstance.get(`${base(server)}/regions`, { params: place })).data;
 
 export const getTile = async (server: string, place: Place, region: RegionFile, signal: AbortSignal): Promise<Blob> =>
   (
@@ -196,12 +215,180 @@ export const getHeatmap = async (server: string, place: Place, days: number): Pr
 export const resetHeatmap = async (server: string): Promise<number> =>
   (await axiosInstance.delete(`${base(server)}/heatmap`)).data.deleted;
 
-export const deleteChunks = async (
+// Chunk tools (MCA Selector): filters, changes, jobs, overlays, export, imports, operations.
+
+export interface FileNeeds {
+  region: boolean;
+  entities: boolean;
+  poi: boolean;
+}
+
+export type CheckResult<T> = ({ ok: true } & T) | { ok: false; error: string; position: number };
+
+export const checkFilter = async (
+  server: string,
+  query: string,
+): Promise<CheckResult<{ normalized: string; needs: FileNeeds }>> =>
+  (await axiosInstance.post(`${base(server)}/filter/check`, { query })).data;
+
+export const checkChanges = async (server: string, changes: string): Promise<CheckResult<{ normalized: string }>> =>
+  (await axiosInstance.post(`${base(server)}/changes/check`, { changes })).data;
+
+export interface Offset {
+  /** Chunks. */
+  x: number;
+  /** Sections (16 blocks). */
+  y: number;
+  /** Chunks. */
+  z: number;
+}
+
+export type JobRequest =
+  | { kind: 'filter'; world: string; dimension: string; query: string; selection?: WireSelection | null }
+  | { kind: 'delete'; world: string; dimension: string; selection: WireSelection }
+  | { kind: 'change'; world: string; dimension: string; selection: WireSelection; changes: string; force: boolean }
+  | {
+      kind: 'import';
+      source: Place | { folder: string };
+      target: Place;
+      offset: Offset;
+      overwrite: boolean;
+      source_selection?: WireSelection | null;
+      target_selection?: WireSelection | null;
+      sections?: string | null;
+    };
+
+export type JobKind = 'filter' | 'delete' | 'change' | 'import' | 'restore';
+export type OperationKind = 'delete' | 'change' | 'import' | 'restore';
+
+export interface RegionError {
+  region: string;
+  error: string;
+}
+
+export interface Operation {
+  id: string;
+  kind: OperationKind;
+  /** Unix seconds. */
+  created: number;
+  user: string | null;
+  username: string | null;
+  world: string;
+  dimension: string;
+  /** The backup folder, relative to the server root. */
+  backup: string;
+  files: number;
+  summary: Record<string, unknown> | null;
+  state: 'done' | 'partial' | 'restored' | 'pruned';
+  restorable: boolean;
+}
+
+export interface FilterResult {
+  matched: number;
+  regions_read: number;
+  selection: WireSelection;
+  errors: RegionError[];
+  /** Regions that could not be read. */
+  failures: number;
+  /** Stopped early (cancelled or failed): the result covers part of the dimension. */
+  partial: boolean;
+}
+
+export interface WriteResult {
+  chunks: number;
+  skipped: number;
+  files: number;
+  operation: Operation | null;
+  errors: RegionError[];
+  /** Regions that could not be written. */
+  failures: number;
+  /** Stopped early (cancelled or failed): only part of the work was done. */
+  partial: boolean;
+}
+
+export interface Job {
+  id: string;
+  kind: JobKind;
+  state: 'running' | 'done' | 'failed' | 'cancelled';
+  world: string;
+  dimension: string;
+  user: string | null;
+  /** Unix seconds. */
+  started: number;
+  finished: number | null;
+  /** Regions. */
+  progress: { done: number; total: number };
+  message: string | null;
+  error: string | null;
+  result: FilterResult | WriteResult | null;
+}
+
+export const isFilterResult = (result: Job['result']): result is FilterResult => !!result && 'matched' in result;
+
+export const createJob = async (server: string, request: JobRequest): Promise<Job> =>
+  (await axiosInstance.post(`${base(server)}/jobs`, request)).data.job;
+
+export const getJobs = async (server: string): Promise<Job[]> =>
+  (await axiosInstance.get(`${base(server)}/jobs`)).data.jobs;
+
+export const getJob = async (server: string, id: string): Promise<Job> =>
+  (await axiosInstance.get(`${base(server)}/jobs/${id}`)).data.job;
+
+export const cancelJob = async (server: string, id: string): Promise<Job> =>
+  (await axiosInstance.post(`${base(server)}/jobs/${id}/cancel`)).data.job;
+
+export interface OverlayValues {
+  /** 1024 values, index x + z * 32; null where the chunk has no value. */
+  values: (number | null)[];
+  min: number | null;
+  max: number | null;
+}
+
+export const getOverlay = async (
   server: string,
   place: Place,
-  rects: ChunkRect[],
-): Promise<{ selected: number; deleted: number; files: number }> =>
-  (await axiosInstance.post(`${base(server)}/chunks/delete`, { ...place, rects })).data;
+  x: number,
+  z: number,
+  overlay: string,
+  parameter: string | null,
+): Promise<OverlayValues> =>
+  (
+    await axiosInstance.get(`${base(server)}/overlay`, {
+      params: { ...place, x, z, overlay, ...(parameter ? { parameter } : {}) },
+    })
+  ).data;
+
+/** Downloads the selected chunks as a zip of region files, with the name the server gives it. */
+export const exportChunks = async (
+  server: string,
+  place: Place,
+  selection: WireSelection,
+): Promise<{ blob: Blob; filename: string | null }> => {
+  const response = await axiosInstance.post(
+    `${base(server)}/export`,
+    { ...place, selection },
+    { responseType: 'blob' },
+  );
+  const disposition = String(response.headers['content-disposition'] ?? '');
+  const match = /filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i.exec(disposition);
+  const filename = match ? (match[1] ? decodeURIComponent(match[1]) : match[2]) : null;
+  return { blob: response.data, filename };
+};
+
+/** Creates an empty staging folder for uploaded region files. */
+export const createImport = async (server: string): Promise<string> =>
+  (await axiosInstance.post(`${base(server)}/imports`)).data.folder;
+
+/** Extracts an uploaded zip in the staging folder; the folder holding its region/, entities/ and
+ * poi/ folders (the import job's source). */
+export const extractImport = async (server: string, folder: string, file: string): Promise<string> =>
+  (await axiosInstance.post(`${base(server)}/imports/extract`, { folder, file })).data.folder;
+
+export const getOperations = async (server: string): Promise<Operation[]> =>
+  (await axiosInstance.get(`${base(server)}/operations`)).data.operations;
+
+export const restoreOperation = async (server: string, id: string): Promise<Job> =>
+  (await axiosInstance.post(`${base(server)}/operations/${id}/restore`)).data.job;
 
 export const updateWorlds = async (server: string, paths: string[]): Promise<ExtraWorld[]> =>
   (await axiosInstance.put(`${base(server)}/worlds`, { extra_worlds: paths })).data.extra_worlds;

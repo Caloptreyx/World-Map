@@ -89,43 +89,6 @@ export const chunkRect = (x1: number, z1: number, x2: number, z2: number): Chunk
   z2: Math.max(chunkOf(z1), chunkOf(z2)),
 });
 
-export const rectArea = (rect: ChunkRect): number => (rect.x2 - rect.x1 + 1) * (rect.z2 - rect.z1 + 1);
-
-/** How many chunks a selection covers, overlaps counted once. Large selections (more than
- * `exactLimit` chunks before overlaps) count their rectangles' areas instead. */
-export const selectedChunks = (rects: ChunkRect[], exactLimit = 200_000): number => {
-  const total = rects.reduce((sum, rect) => sum + rectArea(rect), 0);
-  if (total > exactLimit) return total;
-  const seen = new Set<string>();
-  for (const rect of rects) {
-    for (let z = rect.z1; z <= rect.z2; z++) {
-      for (let x = rect.x1; x <= rect.x2; x++) {
-        seen.add(`${x},${z}`);
-      }
-    }
-  }
-  return seen.size;
-};
-
-const covers = (rect: ChunkRect, x: number, z: number): boolean =>
-  x >= rect.x1 && x <= rect.x2 && z >= rect.z1 && z <= rect.z2;
-
-/** Adds the chunk `(x, z)` to a selection, or removes it when it is selected: covering rectangles
- * are split around it (up to four pieces each), so the rest of them stays selected. */
-export const toggleChunk = (rects: ChunkRect[], x: number, z: number): ChunkRect[] => {
-  if (!rects.some((rect) => covers(rect, x, z))) return [...rects, { x1: x, z1: z, x2: x, z2: z }];
-  return rects.flatMap((rect) => {
-    if (!covers(rect, x, z)) return [rect];
-    const pieces: ChunkRect[] = [
-      { ...rect, z2: z - 1 },
-      { ...rect, z1: z + 1 },
-      { x1: rect.x1, z1: z, x2: x - 1, z2: z },
-      { x1: x + 1, z1: z, x2: rect.x2, z2: z },
-    ];
-    return pieces.filter((piece) => piece.x1 <= piece.x2 && piece.z1 <= piece.z2);
-  });
-};
-
 type Pair = [[number, number], [number, number]];
 
 /** The view while two fingers pinch: the world point under the start midpoint follows the current
@@ -142,15 +105,6 @@ export const pinchView = (start: View, size: Size, from: Pair, to: Pair): View =
 /** Screen cell size for grouping entities: coarse when zoomed out so groups do not hide the terrain. */
 export const clusterCell = (zoom: number): number =>
   zoom < 1 ? 96 : zoom < 2 ? 72 : zoom < 4 ? 56 : zoom < 8 ? 40 : 28;
-
-/** Block coordinates of a selection for the clipboard, one rectangle per line. */
-export const selectionText = (rects: ChunkRect[]): string =>
-  rects
-    .map(
-      (rect) =>
-        `${rect.x1 * CHUNK_BLOCKS} ${rect.z1 * CHUNK_BLOCKS} -> ${rect.x2 * CHUNK_BLOCKS + 15} ${rect.z2 * CHUNK_BLOCKS + 15}`,
-    )
-    .join('\n');
 
 /** A colour for a heat value: transparent blue to opaque red, on a logarithmic scale. */
 export const heatColour = (count: number, max: number): string => {

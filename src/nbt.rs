@@ -1,7 +1,14 @@
-//! Reading Java Edition NBT: big-endian named tags with modified UTF-8 strings. Adapted from
-//! Caloptreyx/Player-Manager (MIT), reader only.
-use flate2::read::{GzDecoder, ZlibDecoder};
-use std::{borrow::Cow, io::Read};
+//! Java Edition NBT: big-endian named tags with modified UTF-8 strings. The reader is adapted from
+//! Caloptreyx/Player-Manager (MIT); the writer produces the bytes vanilla writes for the same tree.
+use flate2::{
+    Compression,
+    read::{GzDecoder, ZlibDecoder},
+    write::{GzEncoder, ZlibEncoder},
+};
+use std::{
+    borrow::Cow,
+    io::{Read, Write},
+};
 
 const END: u8 = 0;
 const BYTE: u8 = 1;
@@ -104,9 +111,114 @@ impl Tag {
             _ => None,
         }
     }
+
+    pub fn as_compound_mut(&mut self) -> Option<&mut Compound> {
+        match self {
+            Self::Compound(compound) => Some(compound),
+            _ => None,
+        }
+    }
+
+    pub fn as_list_mut(&mut self) -> Option<&mut Vec<Tag>> {
+        match self {
+            Self::List(items) => Some(items),
+            _ => None,
+        }
+    }
+
+    pub fn as_ints_mut(&mut self) -> Option<&mut Vec<i32>> {
+        match self {
+            Self::IntArray(values) => Some(values),
+            _ => None,
+        }
+    }
+
+    pub fn as_longs_mut(&mut self) -> Option<&mut Vec<i64>> {
+        match self {
+            Self::LongArray(values) => Some(values),
+            _ => None,
+        }
+    }
+
+    /// The NBT type id (1..=12).
+    pub fn id(&self) -> u8 {
+        match self {
+            Self::Byte(_) => BYTE,
+            Self::Short(_) => SHORT,
+            Self::Int(_) => INT,
+            Self::Long(_) => LONG,
+            Self::Float(_) => FLOAT,
+            Self::Double(_) => DOUBLE,
+            Self::ByteArray(_) => BYTE_ARRAY,
+            Self::String(_) => STRING,
+            Self::List(_) => LIST,
+            Self::Compound(_) => COMPOUND,
+            Self::IntArray(_) => INT_ARRAY,
+            Self::LongArray(_) => LONG_ARRAY,
+        }
+    }
 }
 
 impl Compound {
+    /// An empty compound.
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    /// The number of entries.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn contains(&self, key: &str) -> bool {
+        self.0.iter().any(|(name, _)| name == key)
+    }
+
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut Tag> {
+        self.0
+            .iter_mut()
+            .find(|(name, _)| name == key)
+            .map(|(_, tag)| tag)
+    }
+
+    pub fn compound_mut(&mut self, key: &str) -> Option<&mut Compound> {
+        self.get_mut(key).and_then(Tag::as_compound_mut)
+    }
+
+    pub fn list_mut(&mut self, key: &str) -> Option<&mut Vec<Tag>> {
+        self.get_mut(key).and_then(Tag::as_list_mut)
+    }
+
+    /// Replaces the value in place (keeping the key's position) or appends; the old value.
+    pub fn insert(&mut self, key: impl Into<String>, tag: Tag) -> Option<Tag> {
+        let key = key.into();
+        if let Some(position) = self.0.iter().position(|(name, _)| *name == key) {
+            return Some(std::mem::replace(&mut self.0[position].1, tag));
+        }
+        self.0.push((key, tag));
+        None
+    }
+
+    /// Removes an entry, keeping the order of the others; the old value.
+    pub fn remove(&mut self, key: &str) -> Option<Tag> {
+        let position = self.0.iter().position(|(name, _)| name == key)?;
+        Some(self.0.remove(position).1)
+    }
+
+    /// The entries in file order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Tag)> {
+        self.0.iter().map(|(name, tag)| (name.as_str(), tag))
+    }
+
+    /// The entries in file order, values mutable.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&str, &mut Tag)> {
+        self.0.iter_mut().map(|(name, tag)| (name.as_str(), tag))
+    }
+
     pub fn get(&self, key: &str) -> Option<&Tag> {
         self.0
             .iter()
@@ -134,6 +246,130 @@ impl Compound {
     pub fn numbers(&self, key: &str) -> Option<Vec<f64>> {
         self.list(key)?.iter().map(Tag::as_f64).collect()
     }
+}
+
+/// Collects entries in order; a repeated key replaces the earlier value in place, so keys stay
+/// unique as NBT requires.
+impl FromIterator<(String, Tag)> for Compound {
+    fn from_iter<I: IntoIterator<Item = (String, Tag)>>(entries: I) -> Self {
+        let mut compound = Self::new();
+        for (key, tag) in entries {
+            compound.insert(key, tag);
+        }
+        compound
+    }
+}
+
+/// Serializes a root compound with an empty name (what chunks use); modified UTF-8 strings.
+/// Lists are written with the type of their first element (END when empty, as vanilla does);
+/// elements of another type cannot be stored in an NBT list and are left out. A string longer
+/// than 65535 encoded bytes is cut at the last whole character that fits (Java refuses those).
+pub fn write(root: &Compound) -> Vec<u8> {
+    let mut output = vec![COMPOUND, 0, 0];
+    write_compound(&mut output, root);
+    output
+}
+
+/// Gzip, compression type 1 (and `.dat` files).
+pub fn gzip(data: &[u8]) -> Vec<u8> {
+    let mut encoder = GzEncoder::new(Vec::with_capacity(data.len() / 4), Compression::default());
+    encoder
+        .write_all(data)
+        .expect("writing to a Vec cannot fail");
+    encoder.finish().expect("writing to a Vec cannot fail")
+}
+
+/// A zlib stream, compression type 2 (what the game writes by default).
+pub fn deflate(data: &[u8]) -> Vec<u8> {
+    let mut encoder = ZlibEncoder::new(Vec::with_capacity(data.len() / 4), Compression::default());
+    encoder
+        .write_all(data)
+        .expect("writing to a Vec cannot fail");
+    encoder.finish().expect("writing to a Vec cannot fail")
+}
+
+fn write_compound(output: &mut Vec<u8>, compound: &Compound) {
+    for (name, tag) in &compound.0 {
+        output.push(tag.id());
+        write_string(output, name);
+        write_payload(output, tag);
+    }
+    output.push(END);
+}
+
+/// An array or list length (saturated: no array in memory comes near `i32::MAX` elements).
+fn write_length(output: &mut Vec<u8>, length: usize) {
+    output.extend(i32::try_from(length).unwrap_or(i32::MAX).to_be_bytes());
+}
+
+fn write_payload(output: &mut Vec<u8>, tag: &Tag) {
+    match tag {
+        Tag::Byte(value) => output.extend(value.to_be_bytes()),
+        Tag::Short(value) => output.extend(value.to_be_bytes()),
+        Tag::Int(value) => output.extend(value.to_be_bytes()),
+        Tag::Long(value) => output.extend(value.to_be_bytes()),
+        Tag::Float(value) => output.extend(value.to_be_bytes()),
+        Tag::Double(value) => output.extend(value.to_be_bytes()),
+        Tag::ByteArray(values) => {
+            write_length(output, values.len());
+            output.extend(values.iter().map(|&value| value as u8));
+        }
+        Tag::String(value) => write_string(output, value),
+        Tag::List(items) => {
+            let kind = items.first().map_or(END, Tag::id);
+            output.push(kind);
+            write_length(output, items.iter().filter(|item| item.id() == kind).count());
+            for item in items.iter().filter(|item| item.id() == kind) {
+                write_payload(output, item);
+            }
+        }
+        Tag::Compound(compound) => write_compound(output, compound),
+        Tag::IntArray(values) => {
+            write_length(output, values.len());
+            output.reserve(values.len() * 4);
+            for value in values {
+                output.extend(value.to_be_bytes());
+            }
+        }
+        Tag::LongArray(values) => {
+            write_length(output, values.len());
+            output.reserve(values.len() * 8);
+            for value in values {
+                output.extend(value.to_be_bytes());
+            }
+        }
+    }
+}
+
+/// A length-prefixed modified UTF-8 string, as Java's `DataOutput.writeUTF`: UTF-16 units, NUL
+/// as `C0 80`, supplementary characters as two 3-byte surrogates.
+fn write_string(output: &mut Vec<u8>, value: &str) {
+    let at = output.len();
+    output.extend([0, 0]);
+    let start = output.len();
+    let mut units = [0u16; 2];
+    for character in value.chars() {
+        let before = output.len();
+        for &unit in character.encode_utf16(&mut units).iter() {
+            match unit {
+                0x0001..=0x007F => output.push(unit as u8),
+                0x0000 | 0x0080..=0x07FF => {
+                    output.extend([0xC0 | (unit >> 6) as u8, 0x80 | (unit & 0x3F) as u8]);
+                }
+                _ => output.extend([
+                    0xE0 | (unit >> 12) as u8,
+                    0x80 | ((unit >> 6) & 0x3F) as u8,
+                    0x80 | (unit & 0x3F) as u8,
+                ]),
+            }
+        }
+        if output.len() - start > usize::from(u16::MAX) {
+            output.truncate(before);
+            break;
+        }
+    }
+    let length = (output.len() - start) as u16;
+    output[at..start].copy_from_slice(&length.to_be_bytes());
 }
 
 fn read_limited(reader: impl Read, what: &str) -> Result<Vec<u8>, String> {
@@ -388,5 +624,143 @@ mod tests {
         let gz = encoder.finish().unwrap();
         assert_eq!(decompress(&gz).unwrap().as_ref(), &data[..]);
         assert_eq!(decompress(&data).unwrap().as_ref(), &data[..]);
+    }
+
+    #[test]
+    fn writes_the_bytes_it_read() {
+        let data = sample();
+        assert_eq!(write(&read(&data).unwrap()), data);
+        // real chunks, copied byte for byte from a Paper 1.21.4 world
+        const OVERWORLD: &[u8] = include_bytes!("../tests/fixtures/overworld.mca");
+        let slots = crate::anvil::slots(OVERWORLD).unwrap();
+        assert_eq!(slots.len(), 5);
+        for slot in slots {
+            let (compression, payload) = crate::anvil::payload(OVERWORLD, slot).unwrap().unwrap();
+            let bytes = crate::anvil::decompress(compression, payload).unwrap();
+            assert_eq!(write(&read(&bytes).unwrap()), bytes, "chunk {}", slot.index);
+        }
+    }
+
+    #[test]
+    fn reads_what_it_wrote() {
+        let nested: Compound = [
+            ("byte".to_string(), Tag::Byte(-3)),
+            ("short".to_string(), Tag::Short(-300)),
+            ("float".to_string(), Tag::Float(0.25)),
+            ("bytes".to_string(), Tag::ByteArray(vec![-128, 0, 127])),
+            ("longs".to_string(), Tag::LongArray(vec![i64::MIN, 0, i64::MAX])),
+        ]
+        .into_iter()
+        .collect();
+        let root: Compound = [
+            ("ascii".to_string(), Tag::String("minecraft:stone".into())),
+            ("nul".to_string(), Tag::String("a\0b".into())),
+            ("umlaut é ß".to_string(), Tag::String("Grüße, 世界".into())),
+            ("emoji".to_string(), Tag::String("🧱 block 𝄞".into())),
+            ("empty".to_string(), Tag::List(Vec::new())),
+            (
+                "compounds".to_string(),
+                Tag::List(vec![Tag::Compound(nested.clone()), Tag::Compound(Compound::new())]),
+            ),
+            ("nested".to_string(), Tag::Compound(nested)),
+            ("ints".to_string(), Tag::IntArray(vec![-1, 2, i32::MAX])),
+            ("long".to_string(), Tag::Long(-1 << 40)),
+            ("double".to_string(), Tag::Double(-0.5)),
+        ]
+        .into_iter()
+        .collect();
+        let bytes = write(&root);
+        assert_eq!(read(&bytes).unwrap(), root);
+
+        // an empty list has element type END
+        let empty: Compound = [("e".to_string(), Tag::List(Vec::new()))].into_iter().collect();
+        assert_eq!(write(&empty), vec![COMPOUND, 0, 0, LIST, 0, 1, b'e', END, 0, 0, 0, 0, END]);
+    }
+
+    #[test]
+    fn encodes_modified_utf8() {
+        let encoded = |value: &str| {
+            let mut output = Vec::new();
+            write_string(&mut output, value);
+            output
+        };
+        assert_eq!(encoded("a\0"), vec![0, 3, b'a', 0xC0, 0x80]);
+        assert_eq!(encoded("é"), vec![0, 2, 0xC3, 0xA9]);
+        assert_eq!(encoded("世"), vec![0, 3, 0xE4, 0xB8, 0x96]);
+        // U+1F9F1 as the surrogates D83E DDF1, 3 bytes each
+        assert_eq!(
+            encoded("🧱"),
+            vec![0, 6, 0xED, 0xA0, 0xBE, 0xED, 0xB7, 0xB1]
+        );
+        for value in ["a\0", "é", "世", "🧱", ""] {
+            assert_eq!(decode_mutf8(&encoded(value)[2..]).unwrap(), value);
+        }
+        // too long: cut at a whole character
+        let long = "é".repeat(40_000);
+        let output = encoded(&long);
+        assert_eq!(u16::from_be_bytes([output[0], output[1]]), 65534);
+        assert_eq!(output.len(), 2 + 65534);
+    }
+
+    #[test]
+    fn mutates_compounds_in_place() {
+        let mut root = read(&sample()).unwrap();
+        assert_eq!(root.len(), 4);
+        assert!(root.contains("Pos") && !root.contains("pos"));
+        assert_eq!(root.insert("name", Tag::String("Alex".into())), Some(Tag::String("Steve".into())));
+        assert_eq!(root.insert("Health", Tag::Float(20.0)), None);
+        let keys: Vec<&str> = root.iter().map(|(key, _)| key).collect();
+        assert_eq!(keys, ["name", "Pos", "DataVersion", "UUID", "Health"]);
+        assert_eq!(root.str("name"), Some("Alex"));
+
+        if let Some(Tag::Int(version)) = root.get_mut("DataVersion") {
+            *version = 4325;
+        }
+        root.get_mut("UUID").and_then(Tag::as_ints_mut).unwrap().push(5);
+        root.list_mut("Pos").unwrap().pop();
+        assert_eq!(root.i64("DataVersion"), Some(4325));
+        assert_eq!(root.get("UUID").and_then(Tag::as_ints), Some(&[1, 2, 3, 4, 5][..]));
+        assert_eq!(root.numbers("Pos"), Some(vec![1.5, 64.0]));
+        assert!(root.compound_mut("name").is_none());
+
+        assert_eq!(root.remove("Pos").map(|tag| tag.id()), Some(LIST));
+        assert_eq!(root.remove("Pos"), None);
+        let keys: Vec<&str> = root.iter().map(|(key, _)| key).collect();
+        assert_eq!(keys, ["name", "DataVersion", "UUID", "Health"]);
+
+        for (_, tag) in root.iter_mut() {
+            if let Some(longs) = tag.as_longs_mut() {
+                longs.clear();
+            }
+            if let Some(compound) = tag.as_compound_mut() {
+                compound.insert("x", Tag::Byte(1));
+            }
+        }
+        let mut level = Compound::new();
+        assert!(level.is_empty());
+        level.insert("Data", Tag::Compound(root));
+        level.compound_mut("Data").unwrap().insert("y", Tag::Short(2));
+        assert_eq!(level.compound("Data").unwrap().len(), 5);
+        assert_eq!(read(&write(&level)).unwrap(), level);
+
+        // repeated keys collapse when collecting
+        let collected: Compound = [
+            ("a".to_string(), Tag::Byte(1)),
+            ("b".to_string(), Tag::Byte(2)),
+            ("a".to_string(), Tag::Byte(3)),
+        ]
+        .into_iter()
+        .collect();
+        let entries: Vec<(&str, &Tag)> = collected.iter().collect();
+        assert_eq!(entries, [("a", &Tag::Byte(3)), ("b", &Tag::Byte(2))]);
+    }
+
+    #[test]
+    fn compresses_with_gzip_and_zlib() {
+        let data = sample();
+        assert_eq!(gunzip(&gzip(&data)).unwrap(), data);
+        assert_eq!(inflate(&deflate(&data)).unwrap(), data);
+        assert!(gzip(&data).starts_with(&[0x1F, 0x8B]));
+        assert_eq!(decompress(&gzip(&data)).unwrap().as_ref(), &data[..]);
     }
 }

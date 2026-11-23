@@ -1,5 +1,5 @@
 //! The extension's tables: rendered tiles, servers whose map was opened (with their per-server
-//! settings), heatmap samples.
+//! settings), heatmap samples, chunk tool operations and cached overlay values.
 use crate::players::Visibility;
 use chrono::{DateTime, NaiveDate, Utc};
 use shared::database::Database;
@@ -238,4 +238,361 @@ pub async fn prune_heat(db: &Database, before: NaiveDate) -> Result<u64, sqlx::E
         .execute(db.write())
         .await?;
     Ok(result.rows_affected())
+}
+
+/// A chunk tool write operation (see `ops`). `files` and `summary` are JSON text; the table
+/// stores them as JSONB.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OperationRow {
+    pub id: Uuid,
+    pub user: Option<Uuid>,
+    /// The user's name, filled in by the queries that read rows.
+    pub username: Option<String>,
+    pub kind: String,
+    pub world: String,
+    pub dimension: String,
+    pub backup: String,
+    pub files: String,
+    pub summary: String,
+    pub state: String,
+    pub created: DateTime<Utc>,
+    pub restored: Option<DateTime<Utc>>,
+}
+
+type OperationTuple = (
+    Uuid,
+    Option<Uuid>,
+    Option<String>,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    DateTime<Utc>,
+    Option<DateTime<Utc>>,
+);
+
+const OPERATION_COLUMNS: &str = "o.id, o.user_uuid, u.username, o.kind, o.world, o.dimension, o.backup,
+     o.files::text, o.summary::text, o.state, o.created, o.restored
+     FROM dev_caloptreyx_worldmap_operations AS o LEFT JOIN users AS u ON u.uuid = o.user_uuid";
+
+fn operation_row(row: OperationTuple) -> OperationRow {
+    let (id, user, username, kind, world, dimension, backup, files, summary, state, created, restored) =
+        row;
+    OperationRow {
+        id,
+        user,
+        username,
+        kind,
+        world,
+        dimension,
+        backup,
+        files,
+        summary,
+        state,
+        created,
+        restored,
+    }
+}
+
+pub async fn insert_operation(
+    db: &Database,
+    server: Uuid,
+    row: &OperationRow,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO dev_caloptreyx_worldmap_operations
+             (id, server_uuid, user_uuid, kind, world, dimension, backup, files, summary, state,
+              created, restored)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12)",
+    )
+    .bind(row.id)
+    .bind(server)
+    .bind(row.user)
+    .bind(&row.kind)
+    .bind(&row.world)
+    .bind(&row.dimension)
+    .bind(&row.backup)
+    .bind(&row.files)
+    .bind(&row.summary)
+    .bind(&row.state)
+    .bind(row.created)
+    .bind(row.restored)
+    .execute(db.write())
+    .await?;
+    Ok(())
+}
+
+/// Records the files an operation changed so far (JSON text).
+pub async fn set_operation_files(db: &Database, id: Uuid, files: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE dev_caloptreyx_worldmap_operations SET files = $2::jsonb WHERE id = $1")
+        .bind(id)
+        .bind(files)
+        .execute(db.write())
+        .await?;
+    Ok(())
+}
+
+/// Sets how an operation ended: its state, files and summary (JSON text).
+pub async fn finish_operation(
+    db: &Database,
+    id: Uuid,
+    state: &str,
+    files: &str,
+    summary: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE dev_caloptreyx_worldmap_operations
+         SET state = $2, files = $3::jsonb, summary = $4::jsonb WHERE id = $1",
+    )
+    .bind(id)
+    .bind(state)
+    .bind(files)
+    .bind(summary)
+    .execute(db.write())
+    .await?;
+    Ok(())
+}
+
+/// Marks an operation restored.
+pub async fn set_operation_restored(
+    db: &Database,
+    id: Uuid,
+    at: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE dev_caloptreyx_worldmap_operations SET state = 'restored', restored = $2
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(at)
+    .execute(db.write())
+    .await?;
+    Ok(())
+}
+
+pub async fn delete_operation(db: &Database, id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM dev_caloptreyx_worldmap_operations WHERE id = $1")
+        .bind(id)
+        .execute(db.write())
+        .await?;
+    Ok(())
+}
+
+/// The server's newest operations first.
+pub async fn operations(
+    db: &Database,
+    server: Uuid,
+    limit: i64,
+) -> Result<Vec<OperationRow>, sqlx::Error> {
+    let rows: Vec<OperationTuple> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {OPERATION_COLUMNS} WHERE o.server_uuid = $1 ORDER BY o.created DESC, o.id LIMIT $2"
+    )))
+    .bind(server)
+    .bind(limit)
+    .fetch_all(db.read())
+    .await?;
+    Ok(rows.into_iter().map(operation_row).collect())
+}
+
+pub async fn operation(
+    db: &Database,
+    server: Uuid,
+    id: Uuid,
+) -> Result<Option<OperationRow>, sqlx::Error> {
+    let row: Option<OperationTuple> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {OPERATION_COLUMNS} WHERE o.server_uuid = $1 AND o.id = $2"
+    )))
+    .bind(server)
+    .bind(id)
+    .fetch_optional(db.read())
+    .await?;
+    Ok(row.map(operation_row))
+}
+
+/// The server's operations created after `after`, newest first.
+pub async fn operations_after(
+    db: &Database,
+    server: Uuid,
+    after: DateTime<Utc>,
+) -> Result<Vec<OperationRow>, sqlx::Error> {
+    let rows: Vec<OperationTuple> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {OPERATION_COLUMNS} WHERE o.server_uuid = $1 AND o.created > $2
+         ORDER BY o.created DESC, o.id"
+    )))
+    .bind(server)
+    .bind(after)
+    .fetch_all(db.read())
+    .await?;
+    Ok(rows.into_iter().map(operation_row).collect())
+}
+
+/// Servers with operations whose backups are not pruned yet.
+pub async fn operation_servers(db: &Database) -> Result<Vec<Uuid>, sqlx::Error> {
+    let rows: Vec<(Uuid,)> = sqlx::query_as(
+        "SELECT DISTINCT server_uuid FROM dev_caloptreyx_worldmap_operations WHERE state <> 'pruned'",
+    )
+    .fetch_all(db.read())
+    .await?;
+    Ok(rows.into_iter().map(|(server,)| server).collect())
+}
+
+/// Marks the server's operations created before `before` as pruned (their backups are gone).
+pub async fn prune_operations(
+    db: &Database,
+    server: Uuid,
+    before: DateTime<Utc>,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE dev_caloptreyx_worldmap_operations SET state = 'pruned'
+         WHERE server_uuid = $1 AND created < $2 AND state <> 'pruned'",
+    )
+    .bind(server)
+    .bind(before)
+    .execute(db.write())
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Values per chunk of an overlay in a region (`x + z * 32`; `None` = no value).
+pub const OVERLAY_VALUES: usize = 1024;
+
+/// Encodes overlay values as stored: 1024 little-endian f64, NaN for `None` (a NaN value reads
+/// back as `None`). Missing trailing values are stored as `None`.
+pub fn encode_overlay(values: &[Option<f64>]) -> Vec<u8> {
+    let mut data = Vec::with_capacity(OVERLAY_VALUES * 8);
+    for i in 0..OVERLAY_VALUES {
+        let value = values.get(i).copied().flatten().unwrap_or(f64::NAN);
+        data.extend_from_slice(&value.to_le_bytes());
+    }
+    data
+}
+
+/// Decodes stored overlay values; `None` when the data has the wrong length.
+pub fn decode_overlay(data: &[u8]) -> Option<Vec<Option<f64>>> {
+    if data.len() != OVERLAY_VALUES * 8 {
+        return None;
+    }
+    Some(
+        data.chunks_exact(8)
+            .map(|raw| {
+                let mut bytes = [0u8; 8];
+                bytes.copy_from_slice(raw);
+                let value = f64::from_le_bytes(bytes);
+                (!value.is_nan()).then_some(value)
+            })
+            .collect(),
+    )
+}
+
+/// The cached overlay `key` of the region at `path`: its version (valid while it matches the
+/// region's files) and values. Rows with undecodable data count as missing.
+pub async fn overlay(
+    db: &Database,
+    server: Uuid,
+    path: &str,
+    key: &str,
+) -> Result<Option<(String, Vec<Option<f64>>)>, sqlx::Error> {
+    let row: Option<(String, Vec<u8>)> = sqlx::query_as(
+        "SELECT version, data FROM dev_caloptreyx_worldmap_overlays
+         WHERE server_uuid = $1 AND path = $2 AND overlay = $3",
+    )
+    .bind(server)
+    .bind(path)
+    .bind(key)
+    .fetch_optional(db.read())
+    .await?;
+    Ok(row.and_then(|(version, data)| decode_overlay(&data).map(|values| (version, values))))
+}
+
+/// Caches the overlay `key` of the region at `path` (see [`encode_overlay`]).
+pub async fn store_overlay(
+    db: &Database,
+    server: Uuid,
+    path: &str,
+    key: &str,
+    version: &str,
+    values: &[Option<f64>],
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO dev_caloptreyx_worldmap_overlays (server_uuid, path, overlay, version, data)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (server_uuid, path, overlay) DO UPDATE SET
+             version = EXCLUDED.version, data = EXCLUDED.data, used = now()",
+    )
+    .bind(server)
+    .bind(path)
+    .bind(key)
+    .bind(version)
+    .bind(encode_overlay(values))
+    .execute(db.write())
+    .await?;
+    Ok(())
+}
+
+/// Marks a cached overlay as viewed (at most once an hour), for least-recently-used pruning.
+pub async fn touch_overlay(
+    db: &Database,
+    server: Uuid,
+    path: &str,
+    overlay: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE dev_caloptreyx_worldmap_overlays SET used = now()
+         WHERE server_uuid = $1 AND path = $2 AND overlay = $3 AND used < now() - INTERVAL '1 hour'",
+    )
+    .bind(server)
+    .bind(path)
+    .bind(overlay)
+    .execute(db.write())
+    .await?;
+    Ok(())
+}
+
+/// Bytes of cached overlay values kept panel-wide (8 KiB per region and overlay: 32768 of them).
+pub const OVERLAY_CACHE_BYTES: i64 = 256 << 20;
+
+/// Deletes the least recently viewed cached overlays beyond `budget` bytes of data.
+pub async fn prune_overlays(db: &Database, budget: i64) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "DELETE FROM dev_caloptreyx_worldmap_overlays AS overlays USING (
+             SELECT server_uuid, path, overlay FROM (
+                 SELECT server_uuid, path, overlay,
+                     SUM(octet_length(data)) OVER (ORDER BY used DESC, server_uuid, path, overlay) AS total
+                 FROM dev_caloptreyx_worldmap_overlays
+             ) AS ranked WHERE total > $1
+         ) AS old
+         WHERE overlays.server_uuid = old.server_uuid AND overlays.path = old.path
+             AND overlays.overlay = old.overlay",
+    )
+    .bind(budget)
+    .execute(db.write())
+    .await?;
+    Ok(result.rows_affected())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlay_values_round_trip_with_nan_as_none() {
+        let mut values = vec![None; OVERLAY_VALUES];
+        values[0] = Some(1.5);
+        values[33] = Some(-7.0);
+        values[1023] = Some(0.0);
+        let data = encode_overlay(&values);
+        assert_eq!(data.len(), 8192);
+        assert_eq!(&data[0..8], &1.5f64.to_le_bytes());
+        assert_eq!(decode_overlay(&data).unwrap(), values);
+        // short input is padded with None, a NaN value reads as None
+        let short = encode_overlay(&[Some(f64::NAN), Some(2.0)]);
+        let decoded = decode_overlay(&short).unwrap();
+        assert_eq!(decoded[0], None);
+        assert_eq!(decoded[1], Some(2.0));
+        assert_eq!(decoded[2], None);
+        assert!(decode_overlay(&data[..100]).is_none());
+    }
 }

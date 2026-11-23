@@ -1,7 +1,5 @@
 //! Block, chunk and region coordinates: a chunk is 16 × 16 blocks, a region 32 × 32 chunks
 //! stored in `r.<x>.<z>.mca` with the chunk in slot `(x & 31) + (z & 31) * 32`.
-use serde::Deserialize;
-use std::collections::{BTreeMap, BTreeSet};
 
 /// The chunk holding a block coordinate (floored, so -1 is in chunk -1).
 pub fn chunk_of_block(block: f64) -> i32 {
@@ -26,53 +24,6 @@ pub fn region_file(name: &str) -> Option<(i32, i32)> {
 
 pub fn region_file_name(x: i32, z: i32) -> String {
     format!("r.{x}.{z}.mca")
-}
-
-/// An inclusive rectangle of chunks, corners in any order.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-pub struct ChunkRect {
-    pub x1: i32,
-    pub z1: i32,
-    pub x2: i32,
-    pub z2: i32,
-}
-
-impl ChunkRect {
-    fn bounds(&self) -> (i32, i32, i32, i32) {
-        (
-            self.x1.min(self.x2),
-            self.z1.min(self.z2),
-            self.x1.max(self.x2),
-            self.z1.max(self.z2),
-        )
-    }
-
-    pub fn area(&self) -> u64 {
-        let (x1, z1, x2, z2) = self.bounds();
-        (x2 as i64 - x1 as i64 + 1) as u64 * (z2 as i64 - z1 as i64 + 1) as u64
-    }
-}
-
-/// The chunks of a selection (rectangles may overlap) grouped by region: region `(x, z)` to the
-/// slots to clear. `None` when the selection covers more than `limit` chunks.
-pub fn by_region(rects: &[ChunkRect], limit: u64) -> Option<BTreeMap<(i32, i32), BTreeSet<usize>>> {
-    let total: u64 = rects.iter().map(ChunkRect::area).sum();
-    if total > limit {
-        return None;
-    }
-    let mut regions: BTreeMap<(i32, i32), BTreeSet<usize>> = BTreeMap::new();
-    for rect in rects {
-        let (x1, z1, x2, z2) = rect.bounds();
-        for z in z1..=z2 {
-            for x in x1..=x2 {
-                regions
-                    .entry((region_of_chunk(x), region_of_chunk(z)))
-                    .or_default()
-                    .insert(slot(x, z));
-            }
-        }
-    }
-    Some(regions)
 }
 
 /// The regions a block rectangle touches, or `None` when there are more than `limit`.
@@ -137,41 +88,6 @@ mod tests {
         assert_eq!(region_file("c.0.0.mca"), None);
         assert_eq!(region_file("r.a.0.mca"), None);
         assert_eq!(region_file_name(-3, 7), "r.-3.7.mca");
-    }
-
-    #[test]
-    fn selections_group_by_region_without_duplicates() {
-        let rects = [
-            ChunkRect {
-                x1: 30,
-                z1: 0,
-                x2: 33,
-                z2: 1,
-            },
-            // overlaps the first one, corners swapped
-            ChunkRect {
-                x1: 31,
-                z1: 1,
-                x2: 31,
-                z2: 0,
-            },
-            ChunkRect {
-                x1: -1,
-                z1: -1,
-                x2: -1,
-                z2: -1,
-            },
-        ];
-        let regions = by_region(&rects, 100).unwrap();
-        assert_eq!(regions.len(), 3);
-        assert_eq!(
-            regions[&(0, 0)],
-            BTreeSet::from([30, 31, 30 + 32, 31 + 32])
-        );
-        assert_eq!(regions[&(1, 0)], BTreeSet::from([0, 1, 32, 33]));
-        assert_eq!(regions[&(-1, -1)], BTreeSet::from([1023]));
-        assert_eq!(rects[0].area(), 8);
-        assert!(by_region(&rects, 9).is_none());
     }
 
     #[test]

@@ -31,6 +31,8 @@ pub struct Settings {
     pub max_delete_chunks: u32,
     /// Rendered tiles kept in the database, in MiB; the least recently viewed go first.
     pub tile_cache_mb: u32,
+    /// Days chunk tool backups (`.worldmap-backups/`) are kept before they are deleted.
+    pub backup_retention_days: u32,
 }
 
 impl Default for Settings {
@@ -46,6 +48,7 @@ impl Default for Settings {
             entity_limit: 5000,
             max_delete_chunks: 65536,
             tile_cache_mb: 2048,
+            backup_retention_days: 7,
         }
     }
 }
@@ -73,6 +76,7 @@ impl Settings {
         check(&mut errors, "entity_limit", self.entity_limit, 100, 50_000);
         check(&mut errors, "max_delete_chunks", self.max_delete_chunks, 1, 1_048_576);
         check(&mut errors, "tile_cache_mb", self.tile_cache_mb, 64, 1_048_576);
+        check(&mut errors, "backup_retention_days", self.backup_retention_days, 1, 365);
         if self.eggs.len() > 1000 {
             errors.push("eggs must list at most 1000 eggs".into());
         }
@@ -105,7 +109,8 @@ impl SettingsSerializeExt for Settings {
             .write_serde_setting("nether_ceiling", &self.nether_ceiling)?
             .write_serde_setting("entity_limit", &self.entity_limit)?
             .write_serde_setting("max_delete_chunks", &self.max_delete_chunks)?
-            .write_serde_setting("tile_cache_mb", &self.tile_cache_mb)?)
+            .write_serde_setting("tile_cache_mb", &self.tile_cache_mb)?
+            .write_serde_setting("backup_retention_days", &self.backup_retention_days)?)
     }
 }
 
@@ -137,6 +142,7 @@ impl SettingsDeserializeExt for SettingsDataDeserializer {
             entity_limit: serde_or!("entity_limit", d.entity_limit),
             max_delete_chunks: serde_or!("max_delete_chunks", d.max_delete_chunks),
             tile_cache_mb: serde_or!("tile_cache_mb", d.tile_cache_mb),
+            backup_retention_days: serde_or!("backup_retention_days", d.backup_retention_days),
         }))
     }
 }
@@ -163,6 +169,28 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(wrong.validate().unwrap_err().len(), 3);
+    }
+
+    #[test]
+    fn backup_retention_is_one_day_to_a_year() {
+        assert_eq!(Settings::default().backup_retention_days, 7);
+        for days in [1, 365] {
+            let settings = Settings {
+                backup_retention_days: days,
+                ..Settings::default()
+            };
+            assert!(settings.validate().is_ok(), "{days}");
+        }
+        for days in [0, 366] {
+            let settings = Settings {
+                backup_retention_days: days,
+                ..Settings::default()
+            };
+            assert_eq!(
+                settings.validate().unwrap_err(),
+                vec!["backup_retention_days must be between 1 and 365".to_string()]
+            );
+        }
     }
 
     #[test]

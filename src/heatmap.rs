@@ -6,7 +6,7 @@ use crate::{
     access::Power,
     coords, db,
     map::{Map, SMALL_FILE},
-    players,
+    ops, players,
     settings::{self, Settings},
 };
 use chrono::{DateTime, Utc};
@@ -60,8 +60,15 @@ async fn prune(state: &State, settings: &Settings) -> Result<(), anyhow::Error> 
         - chrono::Days::new(u64::from(settings.heatmap_retention_days.max(1)));
     let samples = db::prune_heat(&state.database, keep_from).await?;
     let tiles = db::prune_tiles(&state.database, i64::from(settings.tile_cache_mb) << 20).await?;
-    if samples > 0 || tiles > 0 {
-        tracing::info!("world map: pruned {samples} old heatmap rows and {tiles} cached tiles");
+    let overlays = db::prune_overlays(&state.database, db::OVERLAY_CACHE_BYTES).await?;
+    if samples > 0 || tiles > 0 || overlays > 0 {
+        tracing::info!(
+            "world map: pruned {samples} old heatmap rows, {tiles} cached tiles and {overlays} cached overlays"
+        );
+    }
+    // old chunk tool backups and import staging folders, through each server's Wings
+    if let Err(err) = ops::prune(state).await {
+        tracing::warn!("world map: pruning backups failed: {err:#}");
     }
     Ok(())
 }

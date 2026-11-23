@@ -305,6 +305,111 @@
   }
 }
 
+/* chunk tools: a card above the toolbar on wide screens (a bottom sheet on narrow ones) */
+.wm-tools {
+  position: absolute;
+  right: 12px;
+  bottom: 68px;
+  z-index: 6;
+  width: 420px;
+  max-width: calc(100% - 24px);
+  max-height: calc(100% - 80px);
+  display: flex;
+  flex-direction: column;
+}
+
+.wm-tools-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 8px 12px 12px;
+}
+
+.wm-job,
+.wm-result {
+  padding: 8px 10px;
+  border-radius: var(--mantine-radius-sm);
+  border: 1px solid var(--mantine-color-default-border);
+  background: color-mix(in srgb, var(--mantine-color-text) 4%, transparent);
+}
+
+.wm-job[data-state='failed'] {
+  border-color: color-mix(in srgb, var(--mantine-color-red-6) 60%, transparent);
+}
+
+.wm-job[data-state='done'] {
+  border-color: color-mix(in srgb, var(--mantine-color-green-6) 50%, transparent);
+}
+
+.wm-job-errors {
+  max-height: 120px;
+  overflow-y: auto;
+  margin-top: 4px;
+  font-size: 11px;
+}
+
+.wm-filter-group {
+  padding: 8px;
+  border-radius: var(--mantine-radius-sm);
+  border: 1px dashed var(--mantine-color-default-border);
+}
+
+.wm-filter-group[data-root='true'] {
+  border-style: solid;
+}
+
+.wm-filter-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wm-filter-where {
+  width: 74px;
+  font-size: var(--mantine-font-size-xs);
+  color: var(--mantine-color-dimmed);
+  line-height: 30px;
+}
+
+.wm-query-error {
+  margin-top: 4px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.wm-query-error mark {
+  background: var(--mantine-color-red-6);
+  color: #fff;
+  border-radius: 2px;
+}
+
+.wm-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 6px 10px;
+}
+
+.wm-field[data-enabled='true'] {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wm-code {
+  padding: 6px 8px;
+  border-radius: var(--mantine-radius-sm);
+  background: color-mix(in srgb, var(--mantine-color-text) 6%, transparent);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.wm-popover-scroll {
+  max-height: min(70dvh, 560px);
+  overflow-y: auto;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .wm-skeleton {
     animation: none;

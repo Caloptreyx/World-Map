@@ -3,11 +3,11 @@
 //! [`Action`] first.
 use crate::{
     access::{self, Action, Power},
-    anvil, cache::Memo,
-    coords::{self, ChunkRect},
-    db, entities,
+    cache::Memo,
+    coords, db, entities,
     map::{Layout, Map, SMALL_FILE, not_found},
     online::{self, Presence},
+    ops,
     players::{self, Visibility},
     render, tiles,
     worlds::{self, OLDEST_DATA_VERSION},
@@ -25,7 +25,7 @@ use shared::{
     GetState, Payload, State,
     models::{
         server::{GetServer, GetServerActivityLogger},
-        user::{GetPermissionManager, GetUser},
+        user::GetPermissionManager,
     },
     response::{ApiResponse, ApiResponseResult},
 };
@@ -103,9 +103,13 @@ async fn overview(
             "retention_days": settings.heatmap_retention_days,
         },
         "limits": {
-            "delete_chunks": settings.max_delete_chunks,
+            "operation_chunks": settings.max_delete_chunks,
             "entity_regions": ENTITY_REGIONS,
             "extra_worlds": worlds::MAX_EXTRA,
+        },
+        "backups": {
+            "retention_days": settings.backup_retention_days,
+            "folder": ops::BACKUPS,
         },
     }))
     .ok()
@@ -128,7 +132,16 @@ async fn regions(
     let layout = map.layout(false).await?;
     let (_, dimension) = layout.dimension(&place.world, &place.dimension)?;
     let regions = map.regions(&dimension.folder, "region", false).await?;
-    ApiResponse::new_serialized(json!({ "regions": *regions })).ok()
+    // regions with only entities or points of interest still count for inverted selections
+    let mut others = BTreeSet::new();
+    for kind in ["entities", "poi"] {
+        for file in map.regions(&dimension.folder, kind, false).await?.iter() {
+            if !regions.iter().any(|region| region.x == file.x && region.z == file.z) {
+                others.insert((file.x, file.z));
+            }
+        }
+    }
+    ApiResponse::new_serialized(json!({ "regions": *regions, "others": others })).ok()
 }
 
 #[derive(Deserialize)]
@@ -468,98 +481,6 @@ async fn reset_heatmap(
 }
 
 #[derive(Deserialize)]
-struct DeleteChunks {
-    world: String,
-    dimension: String,
-    rects: Vec<ChunkRect>,
-}
-
-async fn delete_chunks(
-    state: GetState,
-    permissions: GetPermissionManager,
-    user: GetUser,
-    server: GetServer,
-    activity_logger: GetServerActivityLogger,
-    Payload(data): Payload<DeleteChunks>,
-) -> ApiResponseResult {
-    let map = Map::open(&state, &server).await?;
-    access::authorize(Action::DeleteChunks, &permissions, power(&map).await)?;
-    if data.rects.is_empty() || data.rects.len() > 1000 {
-        return Err(bad_request("select between 1 and 1000 areas"));
-    }
-    let limit = u64::from(map.settings.max_delete_chunks);
-    let groups = coords::by_region(&data.rects, limit)
-        .ok_or_else(|| bad_request(format!("select at most {limit} chunks at once")))?;
-    let selected: usize = groups.values().map(BTreeSet::len).sum();
-    let layout = map.layout(true).await?;
-    let (world, dimension) = layout.dimension(&data.world, &data.dimension)?;
-
-    let mut deleted = 0;
-    let mut files = Vec::new();
-    // terrain, then the entities and points of interest stored for the same chunks
-    for kind in ["region", "entities", "poi"] {
-        let present = map.regions(&dimension.folder, kind, true).await?;
-        for ((x, z), slots) in &groups {
-            if !present.iter().any(|file| file.x == *x && file.z == *z) {
-                continue;
-            }
-            // the server may have been started meanwhile
-            access::authorize(Action::DeleteChunks, &permissions, power(&map).await)?;
-            let path = format!(
-                "{}/{kind}/{}",
-                dimension.folder,
-                coords::region_file_name(*x, *z)
-            );
-            let Some(bytes) = map.read(&path, map.region_limit()).await? else {
-                continue;
-            };
-            let slots = slots.clone();
-            let (rewritten, removed) =
-                tokio::task::spawn_blocking(move || anvil::without_chunks(&bytes, &slots))
-                    .await
-                    .map_err(|_| ApiResponse::error("rewriting the region failed"))?
-                    .map_err(|err| {
-                        ApiResponse::error(format!("{path} could not be read: {err}"))
-                            .with_status(StatusCode::UNPROCESSABLE_ENTITY)
-                    })?;
-            if removed == 0 {
-                continue;
-            }
-            let revision = map.write(&path, user.uuid, rewritten).await?;
-            activity_logger
-                .log(
-                    "server:file.write",
-                    json!({ "file": format!("/{path}"), "revision_id": revision }),
-                )
-                .await;
-            if kind == "region" {
-                deleted += removed;
-            }
-            files.push(path);
-        }
-    }
-    map.forget(&dimension.folder);
-    activity_logger
-        .log(
-            "server:worldmap.delete-chunks",
-            json!({
-                "world": world.name,
-                "dimension": dimension.id,
-                "selected": selected,
-                "deleted": deleted,
-                "files": files,
-            }),
-        )
-        .await;
-    ApiResponse::new_serialized(json!({
-        "selected": selected,
-        "deleted": deleted,
-        "files": files.len(),
-    }))
-    .ok()
-}
-
-#[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Target {
     Player {
@@ -723,11 +644,11 @@ pub fn router(state: &State) -> OpenApiRouter<State> {
         .route("/online", get(online_players))
         .route("/entities", get(entity_list))
         .route("/heatmap", get(heatmap).delete(reset_heatmap))
-        .route("/chunks/delete", post(delete_chunks))
         .route("/teleport", post(teleport))
         .route("/worlds", put(update_worlds))
         .route("/players/visibility", put(update_player_visibility))
         .with_state(state.clone())
+        .merge(super::tools::router(state))
 }
 
 #[cfg(test)]

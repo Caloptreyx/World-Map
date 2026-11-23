@@ -10,13 +10,10 @@ import {
   MAX_ZOOM,
   MIN_ZOOM,
   regionOf,
-  selectedChunks,
-  selectionText,
   toScreen,
   toWorld,
   visibleBounds,
   visibleRegions,
-  toggleChunk,
   zoomAt,
 } from '../frontend/src/lib/geometry.ts';
 
@@ -72,43 +69,9 @@ describe('chunk selection', () => {
     assert.deepEqual(chunkRect(31, -1, 0, 20), { x1: 0, z1: -1, x2: 1, z2: 1 });
     assert.deepEqual(chunkRect(-17, -17, -17, -17), { x1: -2, z1: -2, x2: -2, z2: -2 });
   });
-
-  test('overlapping rectangles count each chunk once', () => {
-    const rects = [
-      { x1: 0, z1: 0, x2: 3, z2: 3 },
-      { x1: 2, z1: 2, x2: 5, z2: 5 },
-    ];
-    assert.equal(selectedChunks(rects), 16 + 16 - 4);
-    assert.equal(selectedChunks(rects, 10), 32);
-    assert.equal(selectedChunks([]), 0);
-  });
-
-  test('copies block coordinates of every rectangle', () => {
-    assert.equal(
-      selectionText([
-        { x1: -1, z1: 0, x2: 0, z2: 1 },
-        { x1: 2, z1: 2, x2: 2, z2: 2 },
-      ]),
-      '-16 0 -> 15 31\n32 32 -> 47 47',
-    );
-  });
 });
 
 describe('touch', () => {
-  test('tapping toggles single chunks, splitting larger selections around them', () => {
-    const added = toggleChunk([], 3, -2);
-    assert.deepEqual(added, [{ x1: 3, z1: -2, x2: 3, z2: -2 }]);
-    assert.deepEqual(toggleChunk(added, 3, -2), []);
-    const square = [{ x1: 0, z1: 0, x2: 2, z2: 2 }];
-    const holed = toggleChunk(square, 1, 1);
-    assert.equal(selectedChunks(holed), 8);
-    assert.ok(!holed.some((r) => r.x1 <= 1 && 1 <= r.x2 && r.z1 <= 1 && 1 <= r.z2));
-    assert.equal(selectedChunks(toggleChunk(holed, 1, 1)), 9);
-    // a chunk inside two overlapping rectangles leaves both (11 chunks in the union, minus one)
-    const twice = toggleChunk([square[0], { x1: 1, z1: 1, x2: 4, z2: 1 }], 1, 1);
-    assert.equal(selectedChunks(twice), 10);
-  });
-
   test('pinching zooms around the fingers and follows them', () => {
     const start = { x: 100, z: 100, zoom: 1 };
     const from: [[number, number], [number, number]] = [

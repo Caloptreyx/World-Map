@@ -1,7 +1,10 @@
 import Group from '@/elements/layout/Group.tsx';
 import Stack from '@/elements/layout/Stack.tsx';
+import Anchor from '@/elements/typography/Anchor.tsx';
 import Text from '@/elements/typography/Text.tsx';
 import { useExtTranslations } from '../translations.ts';
+import { FILTER_WIKI } from './FilterTab.tsx';
+import { OVERLAY_WIKI } from './OverlaySettings.tsx';
 
 const dot = (colour: string) => (
   <span style={{ width: 10, height: 10, borderRadius: 999, background: colour, display: 'inline-block' }} />
@@ -46,7 +49,32 @@ export default function HelpContent({ heatmapDays }: { heatmapDays: number }) {
       <Text size='xs' fw={600} mt={4}>
         {t('help.title', {})}
       </Text>
-      {(['move', 'select', 'menu', 'players', 'heatmap', 'worlds', 'data'] as const).map((key) => (
+      {(['move', 'menu', 'players', 'heatmap', 'worlds', 'data'] as const).map((key) => (
+        <Text key={key} size='xs' c='dimmed'>
+          {t(`help.${key}`, {})}
+        </Text>
+      ))}
+      <Text size='xs' fw={600} mt={4}>
+        {t('help.toolsTitle', {})}
+      </Text>
+      {(['select', 'selectTouch', 'selectModes', 'selectCsv'] as const).map((key) => (
+        <Text key={key} size='xs' c='dimmed'>
+          {t(`help.${key}`, {})}
+        </Text>
+      ))}
+      <Text size='xs' c='dimmed'>
+        {t('help.filters', {})}{' '}
+        <Anchor href={FILTER_WIKI} target='_blank' rel='noreferrer' size='xs'>
+          {t('filter.wiki', {})}
+        </Anchor>
+      </Text>
+      <Text size='xs' c='dimmed'>
+        {t('help.overlays', {})}{' '}
+        <Anchor href={OVERLAY_WIKI} target='_blank' rel='noreferrer' size='xs'>
+          {t('filter.wiki', {})}
+        </Anchor>
+      </Text>
+      {(['changes', 'imports', 'backups'] as const).map((key) => (
         <Text key={key} size='xs' c='dimmed'>
           {t(`help.${key}`, {})}
         </Text>

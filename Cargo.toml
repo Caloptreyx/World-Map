@@ -1,8 +1,8 @@
 [package]
 name = "dev_caloptreyx_worldmap"
-description = "A top-down map of Minecraft Java worlds read from the server files: players, mobs and entities, a player heatmap, chunk deletion and teleports."
+description = "A top-down map of Minecraft Java worlds read from the server files: players, mobs and entities, a player heatmap, teleports and MCA Selector-style chunk tools (filters, overlays, editing, import/export) with backups."
 authors = ["Caloptreyx"]
-version = "0.1.2"
+version = "0.1.3"
 edition = { workspace = true }
 
 [dependencies]
@@ -23,7 +23,11 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 utoipa-axum = { workspace = true }
 uuid = { workspace = true }
+# selection wire format (chunk sets)
+base64 = { workspace = true }
 flate2 = "1.1"
-# Minecraft's region compression type 4 (lz4-java block streams), decoding only
-lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-decode", "checked-decode"] }
+# Minecraft's region compression type 4 (lz4-java block streams)
+lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-encode", "safe-decode", "checked-decode"] }
+# lz4-java block checksums (XXHash32) when writing compression type 4
+xxhash-rust = { version = "0.8", features = ["xxh32"] }
 png = "0.18"

@@ -1,4 +1,4 @@
-import { faFire, faImage, faServer } from '@fortawesome/free-solid-svg-icons';
+import { faBoxArchive, faFire, faImage, faServer } from '@fortawesome/free-solid-svg-icons';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
@@ -127,6 +127,17 @@ export default function SettingsPage() {
           {number('entity_limit', t('settings.entityLimit', {}), 100, 50_000)}
           {number('max_delete_chunks', t('settings.maxDelete', {}), 1, 1_048_576)}
           {number('tile_cache_mb', t('settings.tileCache', {}), 64, 1_048_576, t('settings.tileCacheDescription', {}))}
+        </Stack>
+      </TitleCard>
+      <TitleCard title={t('settings.chunkTools', {})} icon={<FontAwesomeIcon icon={faBoxArchive} />}>
+        <Stack>
+          {number(
+            'backup_retention_days',
+            t('settings.backupRetention', {}),
+            1,
+            365,
+            t('settings.backupRetentionDescription', {}),
+          )}
         </Stack>
       </TitleCard>
       {canManage && (

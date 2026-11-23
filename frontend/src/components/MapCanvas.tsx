@@ -1,5 +1,6 @@
 import { type PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { httpErrorToHuman } from '@/api/axios.ts';
+import type { Brush } from './toolsCommon.tsx';
 import { type Entity, getTile, type Heatmap, type Place, type RegionFile } from '../api.ts';
 import { entityIcon, entityLayer, entityName, mobKind } from '../lib/entities.ts';
 import {
@@ -15,13 +16,23 @@ import {
   pinchView,
   REGION_BLOCKS,
   type Size,
-  toggleChunk,
   toScreen,
   toWorld,
   type View,
   visibleRegions,
   zoomAt,
 } from '../lib/geometry.ts';
+import { overlayColour } from '../lib/overlay.ts';
+import {
+  addChunks,
+  addRegions,
+  regionKey,
+  removeChunks,
+  removeRegions,
+  type Selection,
+  toggleChunk,
+  toggleRegion,
+} from '../lib/selection.ts';
 
 export interface Layers {
   onlinePlayers: boolean;
@@ -57,19 +68,33 @@ const groupRadius = (count: number) => (count > 1 ? 13 + Math.min(7, Math.log2(c
 
 const icons = new Map<string, HTMLImageElement | 'failed'>();
 
+/** Overlay values of the regions on screen, keyed `x,z`, and the colour range. */
+export interface OverlayCells {
+  cells: Map<string, (number | null)[]>;
+  min: number;
+  max: number;
+}
+
 interface Props {
   server: string;
   place: Place;
   regions: RegionFile[];
+  /** Every region with a file (region/, entities/ or poi/): an inverted selection covers these. */
+  existing: [number, number][];
   view: View;
   size: Size;
   onView: (view: View) => void;
   layers: Layers;
   heat: Heatmap | null;
+  overlay: OverlayCells | null;
   entities: Entity[];
   selecting: boolean;
-  selection: ChunkRect[];
-  onSelection: (rects: ChunkRect[]) => void;
+  selection: Selection;
+  onSelection: (selection: Selection) => void;
+  /** Clicks and drags pick whole regions. */
+  regionMode: boolean;
+  /** What a drag does; Alt (Option) does the opposite. */
+  brush: Brush;
   picking: boolean;
   onPick: (x: number, z: number) => void;
   onCursor: (point: [number, number] | null) => void;
@@ -86,12 +111,48 @@ interface Drag {
   view: View;
   mode: 'pan' | 'select';
   moved: boolean;
-  additive: boolean;
+  /** The drag removes from the selection instead of adding. */
+  remove: boolean;
   touch: boolean;
 }
 
+interface Preview {
+  rect: ChunkRect;
+  remove: boolean;
+}
+
+const REGION_CHUNKS = 32;
+
+/** The chunk rectangle between two blocks, grown to whole regions in region mode. */
+function pickRect(x1: number, z1: number, x2: number, z2: number, regions: boolean): ChunkRect {
+  const rect = chunkRect(x1, z1, x2, z2);
+  if (!regions) return rect;
+  return {
+    x1: Math.floor(rect.x1 / REGION_CHUNKS) * REGION_CHUNKS,
+    z1: Math.floor(rect.z1 / REGION_CHUNKS) * REGION_CHUNKS,
+    x2: Math.floor(rect.x2 / REGION_CHUNKS) * REGION_CHUNKS + REGION_CHUNKS - 1,
+    z2: Math.floor(rect.z2 / REGION_CHUNKS) * REGION_CHUNKS + REGION_CHUNKS - 1,
+  };
+}
+
+/** Adds or removes a rectangle: whole regions in region mode. */
+function applyRect(selection: Selection, rect: ChunkRect, remove: boolean, regions: boolean): Selection {
+  if (!regions) return remove ? removeChunks(selection, rect) : addChunks(selection, rect);
+  const [rx1, rz1, rx2, rz2] = [rect.x1, rect.z1, rect.x2, rect.z2].map((c) => Math.floor(c / REGION_CHUNKS));
+  return remove ? removeRegions(selection, rx1, rz1, rx2, rz2) : addRegions(selection, rx1, rz1, rx2, rz2);
+}
+
+/** Toggles the chunk, or its region in region mode, under a block. */
+function toggleAt(selection: Selection, x: number, z: number, regions: boolean): Selection {
+  const cx = chunkOf(x);
+  const cz = chunkOf(z);
+  return regions
+    ? toggleRegion(selection, Math.floor(cx / REGION_CHUNKS), Math.floor(cz / REGION_CHUNKS))
+    : toggleChunk(selection, cx, cz);
+}
+
 export default function MapCanvas(props: Props) {
-  const { server, place, regions, view, size, layers, heat, entities, selection } = props;
+  const { server, place, regions, view, size, layers, heat, entities, selection, overlay } = props;
   const canvas = useRef<HTMLCanvasElement>(null);
   const tiles = useRef(new Map<string, Tile>());
   const inFlight = useRef(0);
@@ -103,11 +164,12 @@ export default function MapCanvas(props: Props) {
   const latest = useRef(props);
   latest.current = props;
   const [version, setVersion] = useState(0);
-  const [preview, setPreview] = useState<ChunkRect | null>(null);
+  const [preview, setPreview] = useState<Preview | null>(null);
   const [hovered, setHovered] = useState<Cluster<Entity> | null>(null);
   const [pulse, setPulse] = useState(0);
 
   const byPosition = useMemo(() => new Map(regions.map((region) => [`${region.x},${region.z}`, region])), [regions]);
+  const existingKeys = useMemo(() => new Set(props.existing.map(([x, z]) => regionKey(x, z))), [props.existing]);
   const tileKey = (region: RegionFile) =>
     `${place.world}|${place.dimension}|${region.x}|${region.z}|${region.modified}|${region.size}`;
 
@@ -256,36 +318,91 @@ export default function MapCanvas(props: Props) {
         ctx.restore();
       }
 
-      if (props.selecting && chunkSize >= 6) {
-        ctx.strokeStyle = 'rgba(0, 0, 0, 0.25)';
+      if (overlay) {
+        for (const [x, z] of visibleRegions(view, size)) {
+          const values = overlay.cells.get(regionKey(x, z));
+          if (!values) continue;
+          const [rx, ry] = toScreen(view, size, x * REGION_BLOCKS, z * REGION_BLOCKS);
+          for (let i = 0; i < values.length; i++) {
+            const value = values[i];
+            if (value === null) continue;
+            ctx.fillStyle = overlayColour(value, overlay.min, overlay.max);
+            ctx.fillRect(
+              rx + (i % REGION_CHUNKS) * chunkSize,
+              ry + Math.floor(i / REGION_CHUNKS) * chunkSize,
+              chunkSize,
+              chunkSize,
+            );
+          }
+        }
+      }
+
+      const lines = (cell: number, colour: string) => {
+        ctx.strokeStyle = colour;
         ctx.lineWidth = 1;
         ctx.beginPath();
         const [originX, originY] = toScreen(view, size, 0, 0);
-        const startX = ((originX % chunkSize) + chunkSize) % chunkSize;
-        const startY = ((originY % chunkSize) + chunkSize) % chunkSize;
-        for (let x = startX; x < size.width; x += chunkSize) {
+        const startX = ((originX % cell) + cell) % cell;
+        const startY = ((originY % cell) + cell) % cell;
+        for (let x = startX; x < size.width; x += cell) {
           ctx.moveTo(Math.round(x) + 0.5, 0);
           ctx.lineTo(Math.round(x) + 0.5, size.height);
         }
-        for (let y = startY; y < size.height; y += chunkSize) {
+        for (let y = startY; y < size.height; y += cell) {
           ctx.moveTo(0, Math.round(y) + 0.5);
           ctx.lineTo(size.width, Math.round(y) + 0.5);
         }
         ctx.stroke();
+      };
+      if (props.selecting && chunkSize >= 6 && !props.regionMode) lines(chunkSize, 'rgba(0, 0, 0, 0.25)');
+      if (props.selecting && regionSize >= 6 && (props.regionMode || chunkSize < 6)) {
+        lines(regionSize, 'rgba(255, 255, 255, 0.22)');
       }
 
-      const drawRect = (rect: ChunkRect, fill: string, stroke: string) => {
-        const [sx, sy] = toScreen(view, size, rect.x1 * CHUNK_BLOCKS, rect.z1 * CHUNK_BLOCKS);
-        const w = (rect.x2 - rect.x1 + 1) * chunkSize;
-        const h = (rect.z2 - rect.z1 + 1) * chunkSize;
+      // the selection: whole regions as one rectangle, partly selected ones as runs of chunks; an
+      // inverted selection shades every region with files except the chunks left out
+      const fill = 'rgba(239, 68, 68, 0.28)';
+      const stroke = 'rgba(239, 68, 68, 0.9)';
+      ctx.lineWidth = 1.5;
+      for (const [x, z] of visibleRegions(view, size)) {
+        const key = regionKey(x, z);
+        const stored = selection.regions.get(key);
+        if (selection.inverted ? !existingKeys.has(key) || stored === null : stored === undefined) continue;
+        const [rx, ry] = toScreen(view, size, x * REGION_BLOCKS, z * REGION_BLOCKS);
+        if (!stored) {
+          ctx.fillStyle = fill;
+          ctx.fillRect(rx, ry, regionSize, regionSize);
+          ctx.strokeStyle = stroke;
+          ctx.strokeRect(rx, ry, regionSize, regionSize);
+          continue;
+        }
         ctx.fillStyle = fill;
+        for (let row = 0; row < REGION_CHUNKS; row++) {
+          let start = -1;
+          for (let column = 0; column <= REGION_CHUNKS; column++) {
+            const i = column + row * REGION_CHUNKS;
+            const on = column < REGION_CHUNKS && ((stored[i >> 3] & (1 << (i & 7))) !== 0) !== selection.inverted;
+            if (on && start < 0) start = column;
+            if (!on && start >= 0) {
+              ctx.fillRect(rx + start * chunkSize, ry + row * chunkSize, (column - start) * chunkSize, chunkSize);
+              start = -1;
+            }
+          }
+        }
+        ctx.strokeStyle = 'rgba(239, 68, 68, 0.45)';
+        ctx.strokeRect(rx, ry, regionSize, regionSize);
+      }
+      if (preview) {
+        const [sx, sy] = toScreen(view, size, preview.rect.x1 * CHUNK_BLOCKS, preview.rect.z1 * CHUNK_BLOCKS);
+        const w = (preview.rect.x2 - preview.rect.x1 + 1) * chunkSize;
+        const h = (preview.rect.z2 - preview.rect.z1 + 1) * chunkSize;
+        ctx.fillStyle = preview.remove ? 'rgba(148, 163, 184, 0.25)' : 'rgba(59, 130, 246, 0.2)';
         ctx.fillRect(sx, sy, w, h);
-        ctx.strokeStyle = stroke;
-        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = preview.remove ? 'rgba(226, 232, 240, 0.9)' : 'rgba(59, 130, 246, 0.9)';
+        ctx.setLineDash(preview.remove ? [5, 4] : []);
         ctx.strokeRect(sx, sy, w, h);
-      };
-      for (const rect of selection) drawRect(rect, 'rgba(239, 68, 68, 0.25)', 'rgba(239, 68, 68, 0.9)');
-      if (preview) drawRect(preview, 'rgba(59, 130, 246, 0.2)', 'rgba(59, 130, 246, 0.9)');
+        ctx.setLineDash([]);
+      }
 
       for (const group of clusters) {
         const count = group.members.length;
@@ -348,7 +465,22 @@ export default function MapCanvas(props: Props) {
       cancelAnimationFrame(frame);
       clearTimeout(pulseTimer);
     };
-  }, [view, size, version, pulse, byPosition, layers.heatmap, heat, selection, preview, clusters, props.selecting]);
+  }, [
+    view,
+    size,
+    version,
+    pulse,
+    byPosition,
+    existingKeys,
+    layers.heatmap,
+    heat,
+    overlay,
+    selection,
+    preview,
+    clusters,
+    props.selecting,
+    props.regionMode,
+  ]);
 
   // the wheel zooms around the cursor (a passive React listener could not stop the page from scrolling)
   useEffect(() => {
@@ -408,7 +540,8 @@ export default function MapCanvas(props: Props) {
       view,
       mode: props.selecting && !touch && event.button === 0 ? 'select' : 'pan',
       moved: false,
-      additive: event.shiftKey || touch,
+      // Alt (Option) flips the brush for one drag
+      remove: (props.brush === 'remove') !== event.altKey,
       touch,
     };
     if (touch && props.selecting) {
@@ -419,7 +552,7 @@ export default function MapCanvas(props: Props) {
         if (!current || current.moved) return;
         current.mode = 'select';
         const [x, z] = toWorld(current.view, latest.current.size, current.startX, current.startY);
-        setPreview(chunkRect(x, z, x, z));
+        setPreview({ rect: pickRect(x, z, x, z, latest.current.regionMode), remove: current.remove });
         navigator.vibrate?.(12);
       }, LONG_PRESS_MS);
     }
@@ -458,7 +591,7 @@ export default function MapCanvas(props: Props) {
       });
     } else {
       const [x1, z1] = toWorld(view, size, current.startX, current.startY);
-      setPreview(chunkRect(x1, z1, wx, wz));
+      setPreview({ rect: pickRect(x1, z1, wx, wz, props.regionMode), remove: current.remove });
     }
   };
 
@@ -479,14 +612,14 @@ export default function MapCanvas(props: Props) {
       setPreview(null);
       if (current.moved || current.touch) {
         const [x1, z1] = toWorld(view, size, current.startX, current.startY);
-        const rect = chunkRect(x1, z1, wx, wz);
-        props.onSelection(current.additive ? [...selection, rect] : [rect]);
+        const rect = pickRect(x1, z1, wx, wz, props.regionMode);
+        props.onSelection(applyRect(selection, rect, current.remove, props.regionMode));
       } else {
-        props.onSelection(toggleChunk(selection, chunkOf(wx), chunkOf(wz)));
+        props.onSelection(toggleAt(selection, wx, wz, props.regionMode));
       }
     } else if (!current.moved) {
       if (props.picking) props.onPick(wx, wz);
-      else if (props.selecting) props.onSelection(toggleChunk(selection, chunkOf(wx), chunkOf(wz)));
+      else if (props.selecting) props.onSelection(toggleAt(selection, wx, wz, props.regionMode));
       else if (current.touch) props.onTap(wx, wz, event.clientX, event.clientY);
     }
   };

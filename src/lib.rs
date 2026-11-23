@@ -12,20 +12,28 @@ use std::sync::Arc;
 mod access;
 mod anvil;
 mod cache;
+mod changer;
 mod chunk;
 mod colors;
 mod coords;
 mod db;
 mod entities;
 mod files;
+mod filter;
 mod heatmap;
+mod jobs;
 mod map;
 mod nbt;
 mod online;
+mod ops;
+mod overlay;
 mod players;
+mod process;
 mod query;
+mod relocate;
 mod render;
 mod routes;
+mod selection;
 mod settings;
 mod tiles;
 mod tunnel;
@@ -85,7 +93,15 @@ impl Extension for ExtensionStruct {
                     ),
                     (
                         "delete-chunks",
-                        "Allows deleting selected chunks so they generate again, while the server is stopped. Also needs permission to update files.",
+                        "Allows deleting selected chunks so they generate again, while the server is stopped. The old files are kept as a backup that can be restored. Also needs permission to read file contents and to create, update and delete files.",
+                    ),
+                    (
+                        "edit-chunks",
+                        "Allows changing NBT fields of selected chunks (MCA Selector's Change fields), while the server is stopped. The old files are kept as a backup that can be restored. Also needs permission to read file contents and to create and update files.",
+                    ),
+                    (
+                        "import-chunks",
+                        "Allows copying chunks within the server's worlds and importing uploaded region files, while the server is stopped. The old files are kept as a backup that can be restored. Also needs permission to read file contents and to create and update files.",
                     ),
                     (
                         "teleport",
