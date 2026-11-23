@@ -3627,8 +3627,6 @@ mod tests {
                     .map(|(_, compound)| compound.clone());
                 let (mut timestamp, mut compression) = (0u32, 2u8);
                 let mut chunk = ChunkMut {
-                    x: 0,
-                    z: 0,
                     region: Some(&mut root),
                     entities: entity_chunk.as_mut(),
                     poi: None,
