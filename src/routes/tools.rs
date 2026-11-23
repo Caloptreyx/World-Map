@@ -416,7 +416,7 @@ async fn list_jobs(permissions: GetPermissionManager, server: GetServer) -> ApiR
 async fn get_job(
     permissions: GetPermissionManager,
     server: GetServer,
-    Path(id): Path<Uuid>,
+    Path((_server, id)): Path<(String, Uuid)>,
 ) -> ApiResponseResult {
     access::authorize(Action::View, &permissions, None)?;
     let job = jobs::get(server.uuid, id).ok_or_else(|| not_found("job not found"))?;
@@ -426,7 +426,7 @@ async fn get_job(
 async fn cancel_job(
     permissions: GetPermissionManager,
     server: GetServer,
-    Path(id): Path<Uuid>,
+    Path((_server, id)): Path<(String, Uuid)>,
 ) -> ApiResponseResult {
     access::authorize(Action::View, &permissions, None)?;
     let job = jobs::get(server.uuid, id).ok_or_else(|| not_found("job not found"))?;
@@ -700,7 +700,7 @@ async fn restore_operation(
     user: GetUser,
     server: GetServer,
     activity_logger: GetServerActivityLogger,
-    Path(id): Path<Uuid>,
+    Path((_server, id)): Path<(String, Uuid)>,
 ) -> ApiResponseResult {
     access::authorize(Action::View, &permissions, None)?;
     let map = Map::open(&state, &server).await?;
