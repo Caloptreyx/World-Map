@@ -251,8 +251,8 @@ async fn create_job(
                 server_uuid,
                 Some(user),
                 Kind::Delete,
-                &world,
-                &dimension,
+                &world.clone(),
+                &dimension.clone(),
                 move |handle| async move {
                     let result = process::delete(
                         &handle,
@@ -301,8 +301,8 @@ async fn create_job(
                 server_uuid,
                 Some(user),
                 Kind::Change,
-                &world,
-                &dimension,
+                &world.clone(),
+                &dimension.clone(),
                 move |handle| async move {
                     let normalized = parsed.to_query();
                     let result = process::change(
@@ -374,8 +374,8 @@ async fn create_job(
                 server_uuid,
                 Some(user),
                 Kind::Import,
-                &world,
-                &dimension,
+                &world.clone(),
+                &dimension.clone(),
                 move |handle| async move {
                     let snapshot = new_staging_name() + "-source";
                     let result =
@@ -722,8 +722,8 @@ async fn restore_operation(
         server.uuid,
         Some(user),
         Kind::Restore,
-        &world,
-        &dimension,
+        &world.clone(),
+        &dimension.clone(),
         move |handle| async move {
             handle.message(format!("restoring from {}", operation.backup));
             let _lock = ops::lock(map.server).await;
