@@ -194,6 +194,36 @@ export const getTile = async (server: string, place: Place, region: RegionFile, 
     })
   ).data;
 
+/** The 3D surface of one region: a zlib stream (decoded by lib/surface.ts). */
+export const getSurface = async (
+  server: string,
+  place: Place,
+  region: RegionFile,
+  signal: AbortSignal,
+): Promise<ArrayBuffer> =>
+  (
+    await axiosInstance.get(`${base(server)}/surface`, {
+      params: { ...place, rx: region.x, rz: region.z, v: `${region.modified}-${region.size}` },
+      responseType: 'arraybuffer',
+      signal,
+    })
+  ).data;
+
+/** The top block of one column, as the 3D view's block card shows it. */
+export interface BlockInfo {
+  x: number;
+  /** The top block: the water surface block for wet columns. */
+  y: number;
+  z: number;
+  block: string;
+  biome: string | null;
+  water_depth: number;
+  floor_block: string | null;
+}
+
+export const getBlock = async (server: string, place: Place, x: number, z: number): Promise<BlockInfo> =>
+  (await axiosInstance.get(`${base(server)}/block`, { params: { ...place, x, z } })).data;
+
 export const getPlayers = async (server: string): Promise<{ players: Player[]; presence: Presence | null }> =>
   (await axiosInstance.get(`${base(server)}/players`)).data;
 

@@ -19,6 +19,7 @@ import ServerContentContainer from '@/elements/containers/ServerContentContainer
 import Badge from '@/elements/data-display/Badge.tsx';
 import Alert from '@/elements/feedback/Alert.tsx';
 import Group from '@/elements/layout/Group.tsx';
+import SegmentedControl from '@/elements/layout/SegmentedControl.tsx';
 import Stack from '@/elements/layout/Stack.tsx';
 import ConfirmationModal from '@/elements/modals/ConfirmationModal.tsx';
 import Drawer from '@/elements/overlays/Drawer.tsx';
@@ -34,10 +35,12 @@ import {
   getOverview,
   getPlayers,
   getRegions,
+  type Heatmap,
   type Overview,
   PACKAGE,
   type Place,
   type Player,
+  type RegionFile,
   resetHeatmap,
   teleport,
   type TeleportTarget,
@@ -45,6 +48,7 @@ import {
 import ChunkTools from '../components/ChunkTools.tsx';
 import FloatingPanel from '../components/FloatingPanel.tsx';
 import { jobSummary } from '../components/JobProgress.tsx';
+import Map3D, { type GotoRequest, type Unavailable } from '../components/Map3D.tsx';
 import MapCanvas, { type Layers, type OverlayCells, type TileStatus } from '../components/MapCanvas.tsx';
 import OverlayLegend from '../components/OverlayLegend.tsx';
 import { DEFAULT_OVERLAY, type OverlayChoice, overlayBound, overlayReady } from '../components/OverlaySettings.tsx';
@@ -58,6 +62,8 @@ import WorldsModal from '../components/WorldsModal.tsx';
 import {
   CHUNK_BLOCKS,
   chunkOf,
+  clampZoom,
+  heatColour,
   MAX_TILE_REQUESTS,
   regionOf,
   type Size,
@@ -66,8 +72,10 @@ import {
   visibleBounds,
   visibleRegions,
 } from '../lib/geometry.ts';
+import { overlayColour } from '../lib/overlay.ts';
 import { effectiveLayers, isOnline, restoreLayers, shownPlayers, whyNoPlayers } from '../lib/players.ts';
 import { count, emptySelection, isEmpty, regionKey, type Selection } from '../lib/selection.ts';
+import { type Atmosphere, Terrain3D, type TerrainStatus } from '../lib/terrain3d.ts';
 import { emptyReason, findPlace, initialPlace, showsSpawn } from '../lib/worlds.ts';
 import { useExtTranslations } from '../translations.ts';
 
@@ -83,15 +91,84 @@ const DEFAULT_LAYERS: Layers = {
 const COMPACT_WIDTH = 900;
 /** Below this many screen pixels per chunk, clicks and drags select whole regions. */
 const AUTO_REGION_PIXELS = 4;
+/** Chunks along a region side: tints hold one colour per chunk. */
+const REGION_CHUNKS = 32;
+/** A stable empty list, so the 3D engine is not handed a new file list on every render. */
+const NO_REGIONS: RegionFile[] = [];
+/** The 3D view's guess of the ground height until the terrain under the camera has loaded. */
+const SEA_LEVEL = 64;
+
+type ViewMode = '2d' | '3d';
 
 interface Saved {
   place: Place;
   view: View;
   layers: Layers;
   overlay: OverlayChoice;
+  /** Missing in saves from before the 3D view. */
+  mode: ViewMode;
 }
 
 const storageKey = (server: string) => `${PACKAGE}:view:${server}`;
+
+/** The 3D sky and fog of a dimension: ceilinged ones look like the Nether. */
+function atmosphereOf(id: string, ceiling: boolean): Atmosphere {
+  if (ceiling || id.includes('nether')) return 'nether';
+  // `minecraft:the_end` or `mod:end`, not every id that merely contains the letters
+  if (id.includes('the_end') || id.split(/[:/_]/).includes('end')) return 'end';
+  return 'overworld';
+}
+
+/** `rgba(r, g, b, a)` as the four bytes the 3D tints take. */
+function rgbaBytes(css: string): [number, number, number, number] {
+  const [r = 0, g = 0, b = 0, a = 1] = (css.match(/[\d.]+/g) ?? []).map(Number);
+  return [r, g, b, Math.round(a * 255)];
+}
+
+/** Paints a CSS colour over chunk `index` of a tint (source-over, so the overlay covers the heatmap). */
+function paint(tint: Uint8Array, index: number, css: string) {
+  const [r, g, b, a] = rgbaBytes(css);
+  if (a === 0) return;
+  const offset = index * 4;
+  const top = a / 255;
+  const below = (tint[offset + 3] / 255) * (1 - top);
+  const alpha = top + below;
+  tint[offset] = Math.round((r * top + tint[offset] * below) / alpha);
+  tint[offset + 1] = Math.round((g * top + tint[offset + 1] * below) / alpha);
+  tint[offset + 2] = Math.round((b * top + tint[offset + 2] * below) / alpha);
+  tint[offset + 3] = Math.round(alpha * 255);
+}
+
+/** The heatmap and overlay as per-chunk colours per region, for the 3D columns. */
+function buildTints(heat: Heatmap | null, overlay: OverlayCells | null): Map<string, Uint8Array> | null {
+  if ((!heat || heat.max === 0) && !overlay) return null;
+  const tints = new Map<string, Uint8Array>();
+  const tintOf = (key: string) => {
+    let tint = tints.get(key);
+    if (!tint) {
+      tint = new Uint8Array(REGION_CHUNKS * REGION_CHUNKS * 4);
+      tints.set(key, tint);
+    }
+    return tint;
+  };
+  if (heat && heat.max > 0) {
+    for (const [cx, cz, visits] of heat.cells) {
+      const rx = Math.floor(cx / REGION_CHUNKS);
+      const rz = Math.floor(cz / REGION_CHUNKS);
+      const index = cx - rx * REGION_CHUNKS + (cz - rz * REGION_CHUNKS) * REGION_CHUNKS;
+      paint(tintOf(regionKey(rx, rz)), index, heatColour(visits, heat.max));
+    }
+  }
+  if (overlay) {
+    for (const [key, values] of overlay.cells) {
+      const tint = tintOf(key);
+      values.forEach((value, index) => {
+        if (value !== null) paint(tint, index, overlayColour(value, overlay.min, overlay.max));
+      });
+    }
+  }
+  return tints;
+}
 
 function loadSaved(server: string): Partial<Saved> {
   try {
@@ -219,14 +296,29 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
   const [fullscreen, setFullscreen] = useState(false);
   const [foldersOpen, setFoldersOpen] = useState(false);
   const [visibilityOpen, setVisibilityOpen] = useState(false);
+  const webgl = useMemo(() => Terrain3D.supported(), []);
+  // why the 3D view cannot be chosen (no WebGL2, or it failed to start), else null
+  const [blocked3d, setBlocked3d] = useState<string | null>(() => (webgl ? null : t('mode.unsupported', {})));
+  const [mode, setMode] = useState<ViewMode>(() => (saved.mode === '3d' && webgl ? '3d' : '2d'));
+  const is3d = mode === '3d';
+  const [terrainStatus, setTerrainStatus] = useState<TerrainStatus | null>(null);
+  const [goto, setGoto] = useState<GotoRequest | null>(null);
+  // where the 3D view puts its compass/mode/reset controls and its control hint
+  const [controlsSlot, setControlsSlot] = useState<HTMLDivElement | null>(null);
+  const [hintSlot, setHintSlot] = useState<HTMLDivElement | null>(null);
   const container = useRef<HTMLDivElement>(null);
   const size = useSize(container);
   const fillHeight = useFillHeight(container);
   const compact = size.width > 0 && size.width < COMPACT_WIDTH;
 
   useEffect(() => {
-    localStorage.setItem(storageKey(server), JSON.stringify({ place, view, layers, overlay } satisfies Saved));
-  }, [server, place, view, layers, overlay]);
+    localStorage.setItem(storageKey(server), JSON.stringify({ place, view, layers, overlay, mode } satisfies Saved));
+  }, [server, place, view, layers, overlay, mode]);
+
+  // the 3D view was last open here but this browser cannot show it: say why the map opens in 2D
+  useEffect(() => {
+    if (saved.mode === '3d' && !webgl) addToast(t('mode.unsupported', {}), 'error');
+  }, []);
 
   // the world or dimension went away (folders or level-name changed): back to one that exists
   useEffect(() => {
@@ -249,14 +341,15 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
       if (event.key !== 'Escape') return;
       setMenu(null);
       setPicking(null);
-      // Esc in a field or a dialog closes that, it does not throw the selection away
+      // Esc in a field or a dialog closes that, it does not throw the selection away; in 3D it closes the
+      // block card, and the selection there is out of sight
       const target = event.target instanceof Element ? event.target : null;
-      if (target?.closest('input, textarea, select, [role="dialog"]')) return;
+      if (is3d || target?.closest('input, textarea, select, [role="dialog"]')) return;
       setSelection(emptySelection());
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [is3d]);
 
   const regions = useQuery({
     queryKey: [PACKAGE, server, 'regions', place.world, place.dimension],
@@ -391,24 +484,61 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
   const onlineCount = allPlayers.filter((player) => isOnline(player, onlineNow)).length;
   const offlineCount = allPlayers.length - onlineCount;
   const noPlayers = whyNoPlayers(visibility, drawn);
+  // the heatmap and overlay colour the 3D columns per chunk
+  const tints = useMemo(
+    () => (is3d ? buildTints(layers.heatmap ? (heat.data ?? null) : null, overlayCells) : null),
+    [is3d, layers.heatmap, heat.data, overlayCells],
+  );
 
-  const goTo = (target: Place, x: number, z: number, zoom?: number) => {
+  /** Moves the 3D camera (the 2D map follows `view` by itself). */
+  const flyCamera = (x: number, y: number | null, z: number) => {
+    if (is3d) setGoto((previous) => ({ x, y, z, nonce: (previous?.nonce ?? 0) + 1 }));
+  };
+  const goTo = (target: Place, x: number, z: number, zoom?: number, y: number | null = null) => {
     setPlace({ world: target.world, dimension: target.dimension });
     setView((current) => ({ x, z, zoom: zoom ?? current.zoom }));
+    flyCamera(x, y, z);
   };
   const changePlace = (target: Place) => {
     // another world: its own spawn, the same coordinates mean nothing there
     if (target.world !== place.world) {
       const targetSpawn = overview.worlds.find((world) => world.name === target.world)?.level.spawn;
       setView((now) => ({ x: targetSpawn ? targetSpawn[0] : 0, z: targetSpawn ? targetSpawn[2] : 0, zoom: now.zoom }));
+      flyCamera(targetSpawn ? targetSpawn[0] : 0, null, targetSpawn ? targetSpawn[2] : 0);
     }
     setPlace(target);
     setSelection(emptySelection());
   };
   const locate = (player: Player) => {
-    goTo(player, player.x, player.z, Math.max(view.zoom, 2));
+    goTo(player, player.x, player.z, Math.max(view.zoom, 2), player.y);
     setSelectedUuid(player.uuid);
     setSheet(null);
+  };
+
+  const switchMode = (next: ViewMode) => {
+    if (next === mode) return;
+    // chunk selection and the chunk tools live on the 2D map
+    if (next === '3d') {
+      setSelecting(false);
+      setToolsOpen(false);
+    }
+    setMenu(null);
+    setCursor(null);
+    setTerrainStatus(null);
+    setMode(next);
+  };
+  const onUnavailable = (reason: Unavailable) => {
+    const message =
+      reason.kind === 'lost'
+        ? t('mode.lost', {})
+        : reason.kind === 'failed'
+          ? t('mode.failed', { error: reason.error })
+          : t('mode.unsupported', {});
+    addToast(message, 'error');
+    // a lost context may come back: only a 3D view that cannot start at all is turned off
+    if (reason.kind !== 'lost') setBlocked3d(message);
+    setTerrainStatus(null);
+    setMode('2d');
   };
 
   const runTeleport = async (player: Player, target: TeleportTarget) => {
@@ -420,8 +550,8 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
       addToast(httpErrorToHuman(error), 'error');
     }
   };
-  const teleportHere = (player: Player, x: number, z: number) =>
-    runTeleport(player, { type: 'position', world: place.world, dimension: place.dimension, x, z });
+  const teleportHere = (player: Player, x: number, z: number, y?: number) =>
+    runTeleport(player, { type: 'position', world: place.world, dimension: place.dimension, x, y, z });
 
   const copy = async (text: string) => {
     await navigator.clipboard.writeText(text);
@@ -452,6 +582,7 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
   };
 
   const toggleTools = () => {
+    switchMode('2d');
     setToolsOpen((open) => !open);
     setSheet(null);
   };
@@ -477,10 +608,18 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
   };
 
   const marker = (x: number, z: number) => toScreen(view, size, x, z);
-  const notices = [
+  const terrainNotices = [
+    terrainStatus && terrainStatus.loading > 0 ? t('map3d.loading', { count: terrainStatus.loading }) : null,
+    terrainStatus?.capped ? t('map3d.capped', {}) : null,
+    terrainStatus?.error ? t('map3d.failed', { error: terrainStatus.error }) : null,
+  ];
+  const tileNotices = [
     tileStatus.loading > 0 ? t('map.loading', { count: tileStatus.loading }) : null,
     tileStatus.skipped > 0 ? t('map.zoomInTiles', {}) : null,
     tileStatus.error ? t('map.tileFailed', { error: tileStatus.error }) : null,
+  ];
+  const notices = [
+    ...(is3d ? terrainNotices : tileNotices),
     (layers.mobs || layers.entities) && !entityArea ? t('map.zoomInEntities', {}) : null,
     entities.data?.truncated ? t('map.entitiesTruncated', { count: entities.data.entities.length }) : null,
     layers.heatmap && heat.data && heat.data.max === 0
@@ -503,6 +642,7 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
       }}
       onJump={(x, z) => {
         setView((current) => ({ ...current, x, z }));
+        flyCamera(x, null, z);
         setSheet(null);
       }}
       onFolders={
@@ -600,6 +740,57 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
     </Group>
   );
   const bottomOffset = compact ? 64 : 12;
+  const modeToggle = (
+    <Tooltip label={blocked3d ?? ''} disabled={!blocked3d} multiline w={260} withinPortal>
+      <div className='wm-glass wm-mode'>
+        <SegmentedControl
+          size='sm'
+          radius='xl'
+          aria-label={t('mode.label', {})}
+          data={[
+            { value: '2d', label: t('mode.map2d', {}) },
+            { value: '3d', label: t('mode.map3d', {}), disabled: !!blocked3d },
+          ]}
+          value={mode}
+          onChange={(value) => switchMode(value === '3d' ? '3d' : '2d')}
+        />
+      </div>
+    </Tooltip>
+  );
+  // teleport spot picking works in both views; the selection bar belongs to the 2D map
+  const hintBar = (picking || (!is3d && selecting && (compact || !toolsOpen))) && (
+    <div className='wm-glass' style={{ padding: '8px 12px' }}>
+      {picking ? (
+        <Text size='sm'>{t('players.teleportHint', { name: playerLabel(picking) })}</Text>
+      ) : (
+        <Stack gap={6}>
+          <Text size='sm' fw={isEmpty(selection) ? undefined : 600}>
+            {isEmpty(selection)
+              ? compact
+                ? t('selection.hintTouch', {})
+                : t('selection.hint', {})
+              : t('selection.count', { count: chunkCount })}
+          </Text>
+          <Group gap={6} wrap='wrap'>
+            {selectionControls}
+            {!isEmpty(selection) && (
+              <Button size='xs' variant='subtle' onClick={() => setSelection(emptySelection())}>
+                {t('selection.clear', {})}
+              </Button>
+            )}
+            <Button
+              size='xs'
+              variant='default'
+              leftSection={<FontAwesomeIcon icon={faToolbox} />}
+              onClick={toggleTools}
+            >
+              {t('tools.open', {})}
+            </Button>
+          </Group>
+        </Stack>
+      )}
+    </div>
+  );
 
   return (
     <div
@@ -608,33 +799,74 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
       data-fullscreen={fullscreen}
       style={fullscreen ? { position: 'fixed', inset: 0, zIndex: 150, height: '100dvh' } : { height: fillHeight }}
     >
-      <MapCanvas
-        server={server}
-        place={place}
-        regions={regionFiles ?? []}
-        existing={existing}
-        view={view}
-        size={size}
-        onView={setView}
-        layers={layers}
-        heat={layers.heatmap ? (heat.data ?? null) : null}
-        overlay={overlayCells}
-        entities={entityArea ? (entities.data?.entities ?? []) : []}
-        selecting={selecting}
-        selection={selection}
-        onSelection={setSelection}
-        regionMode={regionMode}
-        brush={brush}
-        picking={!!picking}
-        onPick={(x, z) => {
-          if (picking) teleportHere(picking, x, z);
-          setPicking(null);
-        }}
-        onCursor={setCursor}
-        onMenu={onMenu}
-        onTap={onTap}
-        onTiles={setTileStatus}
-      />
+      {is3d ? (
+        // the camera starts from the 2D view's size, so wait until the map has one
+        size.height > 0 && (
+          <Map3D
+            server={server}
+            place={place}
+            regions={regionFiles ?? NO_REGIONS}
+            atmosphere={atmosphereOf(place.dimension, current?.dimension.ceiling ?? false)}
+            size={size}
+            initialView={view}
+            groundY={spawnHere && spawn ? spawn[1] : SEA_LEVEL}
+            home={spawnHere && spawn ? [spawn[0], spawn[1], spawn[2]] : [0, null, 0]}
+            goto={goto}
+            onView={(next) => setView({ ...next, zoom: clampZoom(next.zoom) })}
+            layers={drawn}
+            players={here}
+            onlineNow={onlineNow}
+            selectedUuid={selectedUuid}
+            onSelectPlayer={setSelectedUuid}
+            spawn={layers.markers && spawnHere ? spawn : null}
+            entities={entityArea ? (entities.data?.entities ?? []) : []}
+            tints={tints}
+            canTeleport={overview.capabilities.teleport && running && canTeleportHere}
+            selected={selected}
+            onTeleport={(player, x, y, z) => teleportHere(player, x, z, y)}
+            picking={!!picking}
+            onPick={(x, y, z) => {
+              if (picking) teleportHere(picking, x, z, y);
+              setPicking(null);
+            }}
+            onCopy={copy}
+            onCursor={setCursor}
+            onStatus={setTerrainStatus}
+            onUnavailable={onUnavailable}
+            compact={compact}
+            controlsTarget={controlsSlot}
+            hintTarget={compact ? null : hintSlot}
+          />
+        )
+      ) : (
+        <MapCanvas
+          server={server}
+          place={place}
+          regions={regionFiles ?? []}
+          existing={existing}
+          view={view}
+          size={size}
+          onView={setView}
+          layers={layers}
+          heat={layers.heatmap ? (heat.data ?? null) : null}
+          overlay={overlayCells}
+          entities={entityArea ? (entities.data?.entities ?? []) : []}
+          selecting={selecting}
+          selection={selection}
+          onSelection={setSelection}
+          regionMode={regionMode}
+          brush={brush}
+          picking={!!picking}
+          onPick={(x, z) => {
+            if (picking) teleportHere(picking, x, z);
+            setPicking(null);
+          }}
+          onCursor={setCursor}
+          onMenu={onMenu}
+          onTap={onTap}
+          onTiles={setTileStatus}
+        />
+      )}
 
       {regionFiles && regionFiles.length === 0 && (
         <div className='wm-empty'>
@@ -649,7 +881,7 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
         </div>
       )}
 
-      {layers.markers && spawnHere && spawn && (
+      {!is3d && layers.markers && spawnHere && spawn && (
         <div
           title={t('map.spawn', {})}
           style={{
@@ -668,57 +900,65 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
         </div>
       )}
 
-      {here.map((player) => {
-        const [left, top] = marker(player.x, player.z);
-        if (left < -40 || top < -40 || left > size.width + 40 || top > size.height + 40) return null;
-        const isSelected = player.uuid === selectedUuid;
-        return (
-          <button
-            key={player.uuid}
-            type='button'
-            className='wm-marker'
-            data-selected={isSelected}
-            data-online={isOnline(player, onlineNow)}
-            aria-label={`${playerLabel(player)} (${isOnline(player, onlineNow) ? t('players.online', {}) : t('players.offline', {})})`}
-            onClick={() => setSelectedUuid(isSelected ? null : player.uuid)}
-            style={{ left, top, zIndex: isSelected ? 4 : 3 }}
-          >
-            <span style={{ position: 'relative' }}>
-              <img className='wm-marker-head' src={avatarUrl(player.uuid, 48)} alt='' />
-              {isOnline(player, onlineNow) && <span className='wm-marker-online' />}
-            </span>
-            <span className='wm-marker-pin' />
-            <span className='wm-marker-name'>{playerLabel(player)}</span>
-          </button>
-        );
-      })}
+      {!is3d &&
+        here.map((player) => {
+          const [left, top] = marker(player.x, player.z);
+          if (left < -40 || top < -40 || left > size.width + 40 || top > size.height + 40) return null;
+          const isSelected = player.uuid === selectedUuid;
+          return (
+            <button
+              key={player.uuid}
+              type='button'
+              className='wm-marker'
+              data-selected={isSelected}
+              data-online={isOnline(player, onlineNow)}
+              aria-label={`${playerLabel(player)} (${isOnline(player, onlineNow) ? t('players.online', {}) : t('players.offline', {})})`}
+              onClick={() => setSelectedUuid(isSelected ? null : player.uuid)}
+              style={{ left, top, zIndex: isSelected ? 4 : 3 }}
+            >
+              <span style={{ position: 'relative' }}>
+                <img className='wm-marker-head' src={avatarUrl(player.uuid, 48)} alt='' />
+                {isOnline(player, onlineNow) && <span className='wm-marker-online' />}
+              </span>
+              <span className='wm-marker-pin' />
+              <span className='wm-marker-name'>{playerLabel(player)}</span>
+            </button>
+          );
+        })}
 
       {compact ? (
-        <Group gap={8} style={{ position: 'absolute', top: 12, left: 12, right: 12, zIndex: 5 }}>
-          <button
-            type='button'
-            className='wm-glass wm-pill'
-            aria-expanded={sheet === 'world'}
-            onClick={() => setSheet(sheet === 'world' ? null : 'world')}
-          >
-            <FontAwesomeIcon icon={faEarthEurope} />
-            {placeLabel(t, overview, place)}
-          </button>
-          <button
-            type='button'
-            className='wm-glass wm-pill'
-            aria-expanded={sheet === 'players'}
-            onClick={() => setSheet(sheet === 'players' ? null : 'players')}
-          >
-            <FontAwesomeIcon icon={faUsers} />
-            {selected ? playerLabel(selected) : t('players.short', {})}
-            {drawn.onlinePlayers && onlineCount > 0 && (
-              <Badge size='xs' color='green' variant='filled' circle>
-                {onlineCount}
-              </Badge>
-            )}
-          </button>
-        </Group>
+        // the 3D controls sit under the pills; the empty rest of this strip lets the map through
+        <div style={{ position: 'absolute', top: 12, left: 12, right: 12, zIndex: 5, pointerEvents: 'none' }}>
+          <Group gap={8} style={{ pointerEvents: 'auto' }}>
+            <button
+              type='button'
+              className='wm-glass wm-pill'
+              aria-expanded={sheet === 'world'}
+              onClick={() => setSheet(sheet === 'world' ? null : 'world')}
+            >
+              <FontAwesomeIcon icon={faEarthEurope} />
+              {placeLabel(t, overview, place)}
+            </button>
+            <button
+              type='button'
+              className='wm-glass wm-pill'
+              aria-expanded={sheet === 'players'}
+              onClick={() => setSheet(sheet === 'players' ? null : 'players')}
+            >
+              <FontAwesomeIcon icon={faUsers} />
+              {selected ? playerLabel(selected) : t('players.short', {})}
+              {drawn.onlinePlayers && onlineCount > 0 && (
+                <Badge size='xs' color='green' variant='filled' circle>
+                  {onlineCount}
+                </Badge>
+              )}
+            </button>
+            {modeToggle}
+          </Group>
+          {is3d && <div ref={setControlsSlot} className='wm-3d-slot' />}
+          {/* in the flow below the pills, so a wrapped pill row does not cover it */}
+          {hintBar && <div style={{ marginTop: 8, pointerEvents: 'auto' }}>{hintBar}</div>}
+        </div>
       ) : (
         <>
           <div style={{ position: 'absolute', top: 12, left: 12, zIndex: 5 }}>
@@ -728,12 +968,16 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
               collapseLabel={t('overview.collapse', {})}
               actions={
                 <Badge size='sm' variant='light'>
-                  {t('overview.badge', {})}
+                  {t(is3d ? 'overview.badge3d' : 'overview.badge', {})}
                 </Badge>
               }
             >
               {overviewContent}
             </FloatingPanel>
+            {is3d && <div ref={setControlsSlot} className='wm-3d-slot' />}
+          </div>
+          <div style={{ position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)', zIndex: 5 }}>
+            {modeToggle}
           </div>
           {/* the chunk tools take the right column while they are open */}
           <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 5, display: toolsOpen ? 'none' : undefined }}>
@@ -831,6 +1075,7 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
               </Text>
             )}
           </div>
+          {is3d && !compact && <div ref={setHintSlot} className='wm-3d-slot' />}
         </Stack>
       </div>
 
@@ -848,6 +1093,7 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
           visibility={visibility}
           selecting={selecting}
           onSelecting={() => {
+            switchMode('2d');
             setSelecting((current) => !current);
             setPicking(null);
           }}
@@ -864,56 +1110,23 @@ function WorldMap({ server, overview }: { server: string; overview: Overview }) 
           onTools={toggleTools}
           overlay={overlay}
           onOverlay={setOverlay}
+          only2d={is3d}
         />
       </div>
 
-      {(picking || (selecting && (compact || !toolsOpen))) && (
+      {hintBar && !compact && (
         <div
-          style={
-            compact
-              ? { position: 'absolute', top: 64, left: 12, right: 12, zIndex: 5 }
-              : {
-                  position: 'absolute',
-                  bottom: 68,
-                  left: '50%',
-                  transform: 'translateX(-50%)',
-                  width: 'max-content',
-                  maxWidth: '95%',
-                  zIndex: 5,
-                }
-          }
+          style={{
+            position: 'absolute',
+            bottom: 68,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            width: 'max-content',
+            maxWidth: '95%',
+            zIndex: 5,
+          }}
         >
-          <div className='wm-glass' style={{ padding: '8px 12px' }}>
-            {picking ? (
-              <Text size='sm'>{t('players.teleportHint', { name: playerLabel(picking) })}</Text>
-            ) : (
-              <Stack gap={6}>
-                <Text size='sm' fw={isEmpty(selection) ? undefined : 600}>
-                  {isEmpty(selection)
-                    ? compact
-                      ? t('selection.hintTouch', {})
-                      : t('selection.hint', {})
-                    : t('selection.count', { count: chunkCount })}
-                </Text>
-                <Group gap={6} wrap='wrap'>
-                  {selectionControls}
-                  {!isEmpty(selection) && (
-                    <Button size='xs' variant='subtle' onClick={() => setSelection(emptySelection())}>
-                      {t('selection.clear', {})}
-                    </Button>
-                  )}
-                  <Button
-                    size='xs'
-                    variant='default'
-                    leftSection={<FontAwesomeIcon icon={faToolbox} />}
-                    onClick={toggleTools}
-                  >
-                    {t('tools.open', {})}
-                  </Button>
-                </Group>
-              </Stack>
-            )}
-          </div>
+          {hintBar}
         </div>
       )}
 

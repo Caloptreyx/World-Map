@@ -57,14 +57,14 @@ type Tile = { state: 'loading' } | { state: 'ready'; bitmap: ImageBitmap } | { s
 const PARALLEL_TILES = 4;
 /** Tiles kept in memory beyond the ones on screen. */
 const KEPT_TILES = 300;
-const ICON_SIZE = 20;
+export const ICON_SIZE = 20;
 const DRAG_THRESHOLD = 4;
 /** Finger movement still counted as a tap. */
 const TOUCH_SLOP = 10;
 const LONG_PRESS_MS = 450;
 
 /** Radius of the disc behind an entity group: grows slowly with its size. */
-const groupRadius = (count: number) => (count > 1 ? 13 + Math.min(7, Math.log2(count) * 2) : ICON_SIZE / 2);
+export const groupRadius = (count: number) => (count > 1 ? 13 + Math.min(7, Math.log2(count) * 2) : ICON_SIZE / 2);
 
 const icons = new Map<string, HTMLImageElement | 'failed'>();
 
@@ -680,7 +680,7 @@ export default function MapCanvas(props: Props) {
 }
 
 /** Entity counts by name (custom names shown as such), the most common first, at most 8 lines. */
-function summarize(members: Entity[]): [string, number][] {
+export function summarize(members: Entity[]): [string, number][] {
   const counts = new Map<string, number>();
   for (const entity of members) {
     const label = entity.name ? `${entity.name} (${entityName(entity.id)})` : entityName(entity.id);
@@ -690,7 +690,7 @@ function summarize(members: Entity[]): [string, number][] {
 }
 
 /** The entity id a group shows: the most frequent one. */
-function mostCommon(members: Entity[]): string {
+export function mostCommon(members: Entity[]): string {
   const counts = new Map<string, number>();
   let best = members[0].id;
   for (const entity of members) {

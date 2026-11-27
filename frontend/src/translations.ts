@@ -20,6 +20,7 @@ const translations = defineTranslations({
       title: 'World Overview',
       description: 'Read straight from the server files, as last saved.',
       badge: '2D Map',
+      badge3d: '3D Map',
       collapse: 'Fold the world overview',
       spawn: 'Spawn',
       savedBy: 'Saved by',
@@ -116,6 +117,7 @@ const translations = defineTranslations({
       overlay: 'Overlay',
       fullscreen: 'Fullscreen',
       help: 'Legend and help',
+      only2d: '{label}: works on the 2D map, switches to it',
     },
     cursor: {
       title: 'Cursor',
@@ -136,6 +138,43 @@ const translations = defineTranslations({
       teleportHere: 'Teleport {name} here',
       emptyTitle: 'No terrain here yet',
       empty: 'This dimension has no saved region files. It fills in once players explore it and the server saves.',
+    },
+    mode: {
+      label: 'Map view',
+      map2d: '2D',
+      map3d: '3D',
+      unsupported: 'The 3D view needs WebGL2, which this browser or device does not offer. The 2D map still works.',
+      failed: 'The 3D view could not start ({error}). Showing the 2D map.',
+      lost: 'The graphics driver reset the 3D view. Showing the 2D map; switch to 3D to try again.',
+    },
+    map3d: {
+      canvas: '3D world map',
+      controls: '3D view controls',
+      compass: 'Facing {degrees}°. Click to face north.',
+      cameraMode: 'Camera mode',
+      map: 'Map',
+      fly: 'Fly',
+      reset: 'Reset',
+      resetLabel: 'Reset the camera angle and go back to spawn',
+      hintMap:
+        'Drag to move · right-drag to turn · scroll to zoom · click a block for details · WASD to move, Shift faster · Q/E turn · F to fly',
+      hintFly:
+        'Drag to look · WASD to fly, Shift faster · Space up · C down · Q/E turn · scroll changes speed · F for map',
+      speed: 'Speed {speed} blocks/s',
+      loading: 'Loading {count} regions…',
+      capped: 'Zoom out is limited to keep memory use low',
+      failed: 'Some regions could not be loaded: {error}',
+      unreadable: 'Nothing in this region can be read (saved before Minecraft 1.13)',
+      block: {
+        loading: 'Reading the block…',
+        missing: 'No block data here: the chunk is missing or not fully generated.',
+        biome: 'Biome',
+        position: 'X / Y / Z',
+        water: 'Water',
+        waterDepth: '{depth} blocks deep, over {floor}',
+        unknown: 'unknown',
+        close: 'Close',
+      },
     },
     heatmap: {
       legend: 'Player activity, last {days} days',
@@ -384,6 +423,18 @@ const translations = defineTranslations({
         'Copy & import moves chunks between worlds and dimensions, imports uploaded region files, and downloads a selection as a zip.',
       backups:
         'Writing needs the server stopped. Each file is written to a temporary file, the original is moved to .worldmap-backups, then the new file takes its place. History restores an operation.',
+      view3dTitle: '3D view',
+      view3dSwitch:
+        '2D | 3D at the top switches between the flat map and a blocky relief of the terrain. Players, spawn, mobs, the heatmap and overlays show in both.',
+      view3dMap:
+        'Map mode: drag to move, right-drag (or Shift-drag) to turn and tilt, scroll to zoom toward the cursor. WASD moves, Shift faster, Q/E turn.',
+      view3dFly:
+        'Fly mode (F or the Map | Fly switch): drag to look, WASD to fly, Space up, C or Alt down, scroll changes speed.',
+      view3dTouch:
+        'On a touch screen: one finger moves, pinch zooms, twist turns and a two-finger drag up or down tilts.',
+      view3dBlock:
+        'Click a block for its name, biome and coordinates, to copy them or teleport the selected player onto it. The compass faces north on click; Reset goes back to spawn.',
+      view3dTools: 'Chunk selection and the chunk tools work on the 2D map: their buttons switch to it.',
     },
     settings: {
       access: 'Access',

@@ -46,6 +46,8 @@ interface Props {
   onTools: () => void;
   overlay: OverlayChoice;
   onOverlay: (overlay: OverlayChoice) => void;
+  /** The 3D view is shown: chunk selection and tools switch to the 2D map first. */
+  only2d: boolean;
 }
 
 interface ToolProps {
@@ -82,6 +84,8 @@ export default function Toolbar(props: Props) {
   const { t } = useExtTranslations();
   // the reason a layer cannot be turned on, else null
   const hidden = t('toolbar.hiddenByServer', {});
+  // chunk selection and tools need the 2D map; in 3D their tooltips say that a click switches to it
+  const only2d = (label: string) => (props.only2d ? t('toolbar.only2d', { label }) : label);
   const layers: [keyof Layers, string, IconDefinition, string | null][] = [
     ['onlinePlayers', t('toolbar.onlinePlayers', {}), faUserCheck, props.visibility.online ? null : hidden],
     ['offlinePlayers', t('toolbar.offlinePlayers', {}), faUserClock, props.visibility.offline ? null : hidden],
@@ -173,17 +177,22 @@ export default function Toolbar(props: Props) {
       )}
       <span className='wm-toolbar-divider' />
       {tip(
-        t('toolbar.select', {}),
+        only2d(t('toolbar.select', {})),
         <Tool
           label={t('toolbar.select', {})}
           icon={faBorderAll}
-          pressed={props.selecting}
+          pressed={props.selecting && !props.only2d}
           onClick={props.onSelecting}
         />,
       )}
       {tip(
-        t('toolbar.chunkTools', {}),
-        <Tool label={t('toolbar.chunkTools', {})} icon={faToolbox} pressed={props.toolsOpen} onClick={props.onTools} />,
+        only2d(t('toolbar.chunkTools', {})),
+        <Tool
+          label={t('toolbar.chunkTools', {})}
+          icon={faToolbox}
+          pressed={props.toolsOpen && !props.only2d}
+          onClick={props.onTools}
+        />,
       )}
       {tip(
         t('toolbar.fullscreen', {}),

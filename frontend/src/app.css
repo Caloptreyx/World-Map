@@ -410,12 +410,182 @@
   overflow-y: auto;
 }
 
+/* 3D view: the WebGL canvas fills the map; markers and cards float over it like on the 2D map */
+.wm-3d-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+  cursor: grab;
+  outline: none;
+}
+
+.wm-3d-canvas:active {
+  cursor: grabbing;
+}
+
+.wm-3d-canvas[data-mode='fly'],
+.wm-3d-canvas[data-picking='true'] {
+  cursor: crosshair;
+}
+
+/* where the page hands the 3D view room for its controls and hint; empty in 2D */
+.wm-3d-slot {
+  width: fit-content;
+  max-width: 100%;
+  pointer-events: auto;
+}
+
+.wm-3d-slot:empty {
+  display: none;
+}
+
+/* the 2D | 3D switch */
+.wm-mode {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: 999px;
+}
+
+.wm-mode .mantine-SegmentedControl-root,
+.wm-3d-controls .mantine-SegmentedControl-root {
+  background: transparent;
+}
+
+.wm-3d-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 4px;
+  border-radius: 999px;
+  width: max-content;
+}
+
+.wm-compass svg {
+  display: block;
+  color: var(--mantine-color-text);
+}
+
+.wm-3d-reset {
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--mantine-color-text);
+  font-size: var(--mantine-font-size-xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 160ms ease;
+}
+
+.wm-3d-reset:hover {
+  background: color-mix(in srgb, var(--mantine-color-text) 9%, transparent);
+}
+
+.wm-3d-reset:focus-visible {
+  outline: 2px solid var(--mantine-primary-color-filled);
+  outline-offset: 1px;
+}
+
+.wm-3d-hint {
+  max-width: 360px;
+  padding: 6px 12px;
+  border-radius: 999px;
+}
+
+.wm-block-card {
+  padding: 10px 12px;
+}
+
+.wm-block-card-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.wm-block-card-id {
+  color: var(--mantine-color-dimmed);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.wm-spawn3d {
+  position: absolute;
+  z-index: 2;
+  transform: translate(-50%, -100%);
+  color: #facc15;
+  font-size: 22px;
+  pointer-events: none;
+  filter: drop-shadow(0 1px 2px rgb(0 0 0 / 0.8));
+}
+
+/* mobs and entities, grouped like on the 2D map; hover and clicks are handled by the canvas */
+.wm-entity3d {
+  position: absolute;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  pointer-events: none;
+}
+
+.wm-entity3d[data-group='true'] {
+  background: rgb(17 20 26 / 0.72);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.28);
+}
+
+.wm-entity3d img {
+  image-rendering: pixelated;
+}
+
+.wm-entity3d-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  border: 1px solid rgb(0 0 0 / 0.6);
+  background: #22c55e;
+}
+
+.wm-entity3d-dot[data-kind='hostile'] {
+  background: #ef4444;
+}
+
+.wm-entity3d-dot[data-kind='other'] {
+  background: #a1a1aa;
+}
+
+.wm-entity3d-count {
+  position: absolute;
+  left: 70%;
+  top: 70%;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #111418;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+  transform: translate(-50%, -50%);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .wm-skeleton {
     animation: none;
   }
   .wm-tool,
   .wm-pill,
+  .wm-3d-reset,
   .wm-marker-head,
   .wm-marker-name {
     transition: none;

@@ -55,6 +55,14 @@ export default function HelpContent({ heatmapDays }: { heatmapDays: number }) {
         </Text>
       ))}
       <Text size='xs' fw={600} mt={4}>
+        {t('help.view3dTitle', {})}
+      </Text>
+      {(['view3dSwitch', 'view3dMap', 'view3dFly', 'view3dTouch', 'view3dBlock', 'view3dTools'] as const).map((key) => (
+        <Text key={key} size='xs' c='dimmed'>
+          {t(`help.${key}`, {})}
+        </Text>
+      ))}
+      <Text size='xs' fw={600} mt={4}>
         {t('help.toolsTitle', {})}
       </Text>
       {(['select', 'selectTouch', 'selectModes', 'selectCsv'] as const).map((key) => (
