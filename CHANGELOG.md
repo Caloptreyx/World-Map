@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.1.4
+
+- **3D view**: a `2D | 3D` switch above the map (remembered per server) shows the world as a
+  blocky relief: every block column is drawn as a block top at its real height with walls down to
+  lower neighbours, so hills, cliffs, trees and builds look terraced like in the game. Colours are
+  the map's biome-tinted block colours, lit in the browser (sunlight, a distinct shade per side,
+  block edges, darker wall bottoms). Water is a translucent, depth-tinted surface over the visible
+  floor. Sky and fog follow the dimension: daylight haze in the Overworld, dark crimson in the
+  Nether (seen below its roof, like the 2D map), a void in the End.
+  - **Map mode**: drag to move, right-drag or Shift-drag to turn and tilt, scroll to zoom toward
+    the cursor, WASD (Shift faster) and Q/E. **Fly mode** (F or the `Map | Fly` switch): drag to
+    look, WASD to fly, Space up, C or Alt down, scroll for speed. Touch: one finger moves, pinch
+    zooms, twist turns, two fingers up or down tilt. Compass (click faces north), Reset (default
+    angle, back to spawn) and a hint bar with the keys.
+  - **Click a block** for its name, biome, X/Y/Z, chunk and region, to copy the coordinates or
+    teleport the selected player onto it.
+  - Players, spawn, mobs and entities are markers on the terrain; locating a player, jumping to
+    coordinates, switching worlds and dimensions, fullscreen, live updates, the heatmap and
+    overlays (tinting the columns) work in 3D as well. Switching keeps the position, world,
+    dimension and layers. Chunk selection and the chunk tools stay on the 2D map: their buttons
+    switch to it.
+  - Rendered with WebGL2 by the extension itself (no 3D library): terrain is meshed in 64 × 64
+    blocks over several frames, with coarser detail in the distance, culled outside the view and
+    kept in a bounded cache; zooming out is limited to keep memory use low. Without WebGL2 the
+    switch is disabled and the 2D map stays.
+- New `GET /surface` (a region's column heights, colours and water as a compact zlib payload,
+  cached like the tiles and sharing their cache size setting) and `GET /block` (one block column,
+  read from its chunk only).
+
 ## 0.1.3
 
 - Chunk tools after [MCA Selector](https://github.com/Querz/mcaselector) (same names, query syntax

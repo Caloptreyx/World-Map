@@ -1,9 +1,9 @@
 # World Map
 
 A [Calagopus Panel](https://calagopus.com) extension that adds a **World Map** page to Minecraft
-Java servers: a top-down map of the world, drawn from the server's own files, with players, mobs
-and entities, a player heatmap, teleports, and MCA Selector's chunk tools (filters, overlays,
-chunk editing, import/export) with backups.
+Java servers: a top-down map and a blocky 3D relief of the world, drawn from the server's own
+files, with players, mobs and entities, a player heatmap, teleports, and MCA Selector's chunk tools
+(filters, overlays, chunk editing, import/export) with backups.
 
 Package name: `dev.caloptreyx.worldmap` · Requires panel `>=1.2.10`
 
@@ -12,6 +12,11 @@ Package name: `dev.caloptreyx.worldmap` · Requires panel `>=1.2.10`
 - **2D map** of every world and dimension, block colours tinted by biome (grass, foliage, water)
   and shaded by slope, like a vanilla map item. Pan by dragging, zoom with the wheel, a pinch or a
   double-click, fullscreen. The map fills the screen below the page header.
+- **3D view** (`2D | 3D` switch, remembered per server): the terrain as stepped block columns,
+  each block top at its real height with walls down to lower neighbours, in the map's biome
+  colours lit by the browser, with translucent water and a sky and fog per dimension (the Nether
+  below its roof). Map and Fly camera modes, compass, reset, keyboard, mouse and touch controls,
+  click a block for its name, biome and coordinates. See [3D view](#3d-view).
 - **World Overview** panel: world select (every world found, the main one marked "(main)"),
   dimension switch, spawn coordinates and the version that last saved the selected world, the
   number of region files, jump to coordinates, and the world folder settings (gear button).
@@ -62,6 +67,10 @@ exactly like the file manager:
   are never downloaded twice. Only regions on screen are rendered, at most a few at a time
   panel-wide (setting), one region file in memory per render. When more than 64 regions are on
   screen, only cached ones are shown until you zoom in.
+- **3D terrain**: the same region read gives, per block column, the height of its topmost block,
+  its unshaded colour (the floor's under water), and the water's depth and colour, sent as a
+  compact zlib payload (`GET /surface`, about 100 to 250 KB per region) and cached in the database
+  exactly like the tiles. The browser builds the block columns from it.
 - The **Nether** (and datapack dimensions with a ceiling) is drawn from a configurable height
   (default 100) down, below its bedrock roof.
 - **Players**: `playerdata/<uuid>.dat` (`players/data/` since 26.1) for the last saved position,
@@ -217,8 +226,43 @@ the backup folder), `server:worldmap.export-chunks`, `server:console.command` fo
 - **Rendering**: largest region file read (default 64 MiB), regions rendered at once (default 2,
   also how many regions chunk tool jobs and overlays read at once), Nether ceiling (default 100),
   most entities per view (default 5000), most chunks one chunk operation may touch (default
-  65 536), tile cache size (default 2048 MiB; least recently viewed tiles are pruned hourly).
+  65 536), tile cache size (default 2048 MiB, 2D tiles and 3D surfaces together; least recently
+  viewed ones are pruned hourly).
 - **Chunk backups**: days to keep the backups of chunk operations (default 7).
+
+## 3D view
+
+The `2D | 3D` switch at the top of the map shows the world as a blocky relief: every block column
+is a block top at the height of its topmost block, with walls down to each lower neighbour (no
+walls where the neighbour is as high or higher) and a skirt where a chunk is missing, so the
+terrain is terraced like in the game. This is a heightmap of the surface the 2D map shows, not
+a full 3D copy of the world: caves, overhangs and the undersides of trees are not drawn.
+
+- **Look**: the 2D map's biome-tinted block colours without its slope shading; the browser lights
+  them with sunlight, a different shade per side, thin block edges and darker wall bottoms.
+  Water is translucent and darker the deeper it is, over its floor. The Overworld has a daylight
+  sky and haze, the Nether a dark crimson fog (and is seen below its roof, from the same ceiling
+  setting as the 2D map), the End a dark void.
+- **Map mode** (default): drag to move, right-drag or Shift-drag to turn and tilt (15° to 85°),
+  scroll to zoom toward the cursor, WASD to move (Shift faster), Q/E to turn, F for Fly mode.
+- **Fly mode**: drag to look around, WASD to fly along the view, Space up, C or Alt down, Shift
+  faster, Q/E to turn, scroll changes the speed, F back to Map mode.
+- **Touch**: one finger moves, pinch zooms, twist turns, a two-finger drag up or down tilts.
+- **Compass** (top left) shows where the camera faces; click it to face north. **Reset** goes back
+  to the default angle at spawn. A hint bar at the bottom lists the keys (desktop only).
+- **Click a block** (without dragging) to highlight it and see its block, biome, X/Y/Z, chunk and
+  region (read from that chunk only, `GET /block`), copy its coordinates or teleport the selected
+  player onto it.
+- Players, spawn, mobs and entities are markers on the terrain, grouped when dense; selecting,
+  locating and teleporting players, jumping to coordinates, switching worlds and dimensions,
+  fullscreen and live updates work as in 2D. The heatmap and overlays tint the columns. Chunk
+  selection and the chunk tools work on the 2D map; their buttons switch to it. Switching between
+  2D and 3D keeps the position, world, dimension and layers.
+- **Performance**: WebGL2, drawn by the extension (no 3D library). Terrain is meshed in 64 × 64
+  column blocks a few per frame, merged into as few faces as possible, coarser in the distance
+  (2 × 2 to 8 × 8 columns per cell), skipped outside the view, and kept in a bounded cache (about
+  40 regions). Zooming out stops at a limit so memory use stays low, with a note saying so. Without
+  WebGL2 the switch is disabled and the 2D map stays.
 
 ## Chunk tools
 
@@ -309,7 +353,9 @@ selection files, so selections and queries move between the two.
 ## API
 
 Below `/api/client/servers/{server}/world-map`: `GET /` (worlds, spawn, capabilities, player
-setting), `GET /regions`, `GET /tile` (PNG), `GET /players` (positions, who is online),
+setting), `GET /regions`, `GET /tile` (PNG), `GET /surface` (3D: zlib payload of column heights,
+colours and water, format in `src/surface.rs`), `GET /block` (one block column, JSON),
+`GET /players` (positions, who is online),
 `GET /online` (names, for teleports), `GET /entities`, `GET|DELETE /heatmap`,
 `POST /teleport`, `PUT /worlds` (folders added by hand), `PUT /players/visibility`
 (`{"online": bool, "offline": bool}`). Chunk tools: `POST /filter/check`, `POST /changes/check`,
