@@ -5,6 +5,9 @@
 .wm-map {
   position: relative;
   overflow: hidden;
+  /* markers partly off the map must not make it scrollable (focus or scrollIntoView would shift
+     everything inside); `clip` forbids programmatic scrolling, `hidden` above is the fallback */
+  overflow: clip;
   isolation: isolate;
   border-radius: var(--mantine-radius-lg);
   border: 1px solid var(--mantine-color-default-border);
