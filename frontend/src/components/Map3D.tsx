@@ -236,7 +236,8 @@ export default function Map3D(props: Props) {
   const hoveredRef = useRef<Cluster<Entity> | null>(null);
   const [, setFrame] = useState(0);
   const [, setIconsFailed] = useState(0);
-  const noHover = useMediaQuery('(hover: none)');
+  // touch-only devices: no keyboard or mouse hints (a touch laptop with a mouse keeps them)
+  const noHover = useMediaQuery('(hover: none) and (pointer: coarse)');
 
   const byPosition = useMemo(
     () => new Map(props.regions.map((region) => [`${region.x},${region.z}`, region])),
@@ -566,11 +567,14 @@ export default function Map3D(props: Props) {
   }, []);
 
   // the wheel zooms toward the cursor, or sets the fly speed (a passive React listener could not stop
-  // the page from scrolling)
+  // the page from scrolling); listened for on the map so player markers over the terrain do not swallow it
   useEffect(() => {
     const element = canvas.current;
-    if (!element) return;
+    const area = element?.parentElement;
+    if (!element || !area) return;
     const onWheel = (event: WheelEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target !== element && !target?.closest('.wm-marker')) return;
       event.preventDefault();
       const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 400 : 1);
       const current = cam.current;
@@ -584,8 +588,8 @@ export default function Map3D(props: Props) {
       const toward: [number, number, number] | undefined = hit ? [hit.x + 0.5, hit.y + 1, hit.z + 0.5] : undefined;
       input(zoomMap(current, 1.0015 ** delta, toward));
     };
-    element.addEventListener('wheel', onWheel, { passive: false });
-    return () => element.removeEventListener('wheel', onWheel);
+    area.addEventListener('wheel', onWheel, { passive: false });
+    return () => area.removeEventListener('wheel', onWheel);
   }, []);
 
   const local = (event: ReactPointerEvent): [number, number] => {

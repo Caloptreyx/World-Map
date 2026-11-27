@@ -58,8 +58,8 @@ const WORLD_MAX_Y = 320;
 const WATER_LIFT = -0.1;
 /** Highlight box: grown a little beyond the block so it is not hidden by the faces it surrounds. */
 const HIGHLIGHT_GROW = 0.02;
-const HIGHLIGHT_FILL: [number, number, number, number] = [1, 1, 1, 0.22];
-const HIGHLIGHT_LINE: [number, number, number, number] = [0.05, 0.05, 0.05, 0.85];
+const HIGHLIGHT_FILL: [number, number, number, number] = [1, 0.82, 0.25, 0.38];
+const HIGHLIGHT_LINE: [number, number, number, number] = [1, 0.7, 0.1, 0.95];
 /** Per-region tint texture: one RGBA texel per chunk. */
 const TINT_SIZE = 32;
 const TINT_BYTES = TINT_SIZE * TINT_SIZE * 4;

@@ -453,7 +453,8 @@ const translations = defineTranslations({
       entityLimit: 'Most entities per view',
       maxDelete: 'Most chunks per deletion',
       tileCache: 'Tile cache size (MiB)',
-      tileCacheDescription: 'Rendered regions are kept in the database; the least recently viewed are removed first.',
+      tileCacheDescription:
+        'Rendered regions (2D tiles and 3D surfaces together) are kept in the database; the least recently viewed are removed first.',
       chunkTools: 'Chunk tools',
       backupRetention: 'Days to keep backups',
       backupRetentionDescription:
