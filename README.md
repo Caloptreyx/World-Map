@@ -50,6 +50,15 @@ Selection panels.
 
 ![Zoomed-in map with mob markers](docs/screenshots/mobs-and-entities.png)
 
+**3D view**: the same world as stepped block columns, turned and tilted in Map mode, with the
+compass, `Map | Fly`, Reset and the key hints.
+
+![3D relief view of a snowy taiga coast](docs/screenshots/3d-view.png)
+
+**Click a block**: its block, biome and coordinates, with copy (and teleport for operators).
+
+![3D view with the block detail card](docs/screenshots/3d-block.png)
+
 **Admin settings**: eggs, heatmap sampling and rendering limits.
 
 ![World Map admin settings](docs/screenshots/admin-settings.png)
