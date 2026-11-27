@@ -35,6 +35,7 @@ mod render;
 mod routes;
 mod selection;
 mod settings;
+mod surface;
 mod tiles;
 mod tunnel;
 mod worlds;

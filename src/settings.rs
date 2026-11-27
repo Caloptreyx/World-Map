@@ -29,7 +29,8 @@ pub struct Settings {
     pub entity_limit: u32,
     /// Most chunks one deletion may select.
     pub max_delete_chunks: u32,
-    /// Rendered tiles kept in the database, in MiB; the least recently viewed go first.
+    /// Rendered tiles and 3D surfaces kept in the database together, in MiB; the least recently
+    /// viewed go first.
     pub tile_cache_mb: u32,
     /// Days chunk tool backups (`.worldmap-backups/`) are kept before they are deleted.
     pub backup_retention_days: u32,

@@ -1,8 +1,8 @@
 [package]
 name = "dev_caloptreyx_worldmap"
-description = "A top-down map of Minecraft Java worlds read from the server files: players, mobs and entities, a player heatmap, teleports and MCA Selector-style chunk tools (filters, overlays, editing, import/export) with backups."
+description = "A 2D and 3D relief map of Minecraft Java worlds read from the server files: players, mobs and entities, a player heatmap, teleports and MCA Selector-style chunk tools (filters, overlays, editing, import/export) with backups."
 authors = ["Caloptreyx"]
-version = "0.1.3"
+version = "0.1.4"
 edition = { workspace = true }
 
 [dependencies]

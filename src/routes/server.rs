@@ -5,11 +5,11 @@ use crate::{
     access::{self, Action, Power},
     cache::Memo,
     coords, db, entities,
-    map::{Layout, Map, SMALL_FILE, not_found},
+    map::{Layout, Map, RegionFile, SMALL_FILE, not_found},
     online::{self, Presence},
     ops,
     players::{self, Visibility},
-    render, tiles,
+    render, surface, tiles,
     worlds::{self, OLDEST_DATA_VERSION},
 };
 use axum::{
@@ -45,6 +45,8 @@ const ENTITY_REGIONS: usize = 9;
 const HEAT_CELLS: i64 = 20_000;
 /// The world border's reach.
 const MAX_COORDINATE: f64 = 30_000_000.0;
+/// The world border's reach in whole blocks.
+const MAX_BLOCK: u64 = 30_000_000;
 
 type Version = (Uuid, String, i64, u64);
 static POSITIONS: LazyLock<Memo<Version, Option<players::Position>>> =
@@ -152,6 +154,36 @@ struct TileQuery {
     z: i32,
 }
 
+/// The region file `(x, z)` of `folder` with its path; 404 when there is none.
+async fn region_file(map: &Map, folder: &str, x: i32, z: i32) -> Result<(RegionFile, String), ApiResponse> {
+    let file = *map
+        .regions(folder, "region", false)
+        .await?
+        .iter()
+        .find(|file| file.x == x && file.z == z)
+        .ok_or_else(|| not_found("region not found"))?;
+    let path = format!("{folder}/region/{}", coords::region_file_name(file.x, file.z));
+    Ok((file, path))
+}
+
+/// The `ETag` of what is made of a region file: its variant and the file's state.
+fn region_etag(variant: &str, file: &RegionFile) -> String {
+    format!("\"{}-{}-{}\"", variant.replace(['"', ' '], ""), file.modified, file.size)
+}
+
+/// A 304 when the browser's copy (`If-None-Match`) is still `etag`.
+fn not_modified(headers: &HeaderMap, etag: &str) -> Option<ApiResponse> {
+    headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|tag| tag.trim() == etag))
+        .then(|| {
+            ApiResponse::new(Body::empty())
+                .with_status(StatusCode::NOT_MODIFIED)
+                .with_header("ETag", etag)
+        })
+}
+
 /// A region tile. Browsers revalidate it every time (`ETag` from the file's state and the
 /// renderer), so a re-rendered tile is never served stale from their cache.
 async fn tile(
@@ -165,38 +197,101 @@ async fn tile(
     let map = Map::open(&state, &server).await?;
     let layout = map.layout(false).await?;
     let (_, dimension) = layout.dimension(&query.world, &query.dimension)?;
-    let file = *map
-        .regions(&dimension.folder, "region", false)
-        .await?
-        .iter()
-        .find(|file| file.x == query.x && file.z == query.z)
-        .ok_or_else(|| not_found("region not found"))?;
-    let path = format!(
-        "{}/region/{}",
-        dimension.folder,
-        coords::region_file_name(file.x, file.z)
-    );
+    let (file, path) = region_file(&map, &dimension.folder, query.x, query.z).await?;
     let ceiling = dimension.ceiling.then_some(map.settings.nether_ceiling);
-    let etag = format!(
-        "\"{}-{}-{}\"",
-        tiles::variant(ceiling).replace(['"', ' '], ""),
-        file.modified,
-        file.size
-    );
-    if headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.split(',').any(|tag| tag.trim() == etag))
-    {
-        return Ok(ApiResponse::new(Body::empty())
-            .with_status(StatusCode::NOT_MODIFIED)
-            .with_header("ETag", &etag));
+    let etag = region_etag(&tiles::variant(ceiling), &file);
+    if let Some(response) = not_modified(&headers, &etag) {
+        return Ok(response);
     }
     let png = tiles::png(&state, &map, &path, file, ceiling).await?;
     Ok(ApiResponse::new(Body::from(png))
         .with_header("Content-Type", "image/png")
         .with_header("Cache-Control", "private, no-cache")
         .with_header("ETag", &etag))
+}
+
+#[derive(Deserialize)]
+struct SurfaceQuery {
+    world: String,
+    dimension: String,
+    rx: i32,
+    rz: i32,
+}
+
+/// A region's 3D surface (zlib-compressed, see [`surface`]), revalidated like a tile.
+async fn surface_tile(
+    state: GetState,
+    permissions: GetPermissionManager,
+    server: GetServer,
+    headers: HeaderMap,
+    Query(query): Query<SurfaceQuery>,
+) -> ApiResponseResult {
+    access::authorize(Action::View, &permissions, None)?;
+    let map = Map::open(&state, &server).await?;
+    let layout = map.layout(false).await?;
+    let (_, dimension) = layout.dimension(&query.world, &query.dimension)?;
+    let (file, path) = region_file(&map, &dimension.folder, query.rx, query.rz).await?;
+    let ceiling = dimension.ceiling.then_some(map.settings.nether_ceiling);
+    let etag = region_etag(&tiles::surface_variant(ceiling), &file);
+    if let Some(response) = not_modified(&headers, &etag) {
+        return Ok(response);
+    }
+    let data = tiles::surface(&state, &map, &path, file, ceiling).await?;
+    Ok(ApiResponse::new(Body::from(data))
+        .with_header("Content-Type", "application/octet-stream")
+        .with_header("Cache-Control", "private, no-cache")
+        .with_header("ETag", &etag))
+}
+
+#[derive(Deserialize)]
+struct BlockQuery {
+    world: String,
+    dimension: String,
+    x: i64,
+    z: i64,
+}
+
+/// One block column for the 3D view's block card, read from the chunk holding it.
+async fn block_info(
+    state: GetState,
+    permissions: GetPermissionManager,
+    server: GetServer,
+    Query(query): Query<BlockQuery>,
+) -> ApiResponseResult {
+    access::authorize(Action::View, &permissions, None)?;
+    if [query.x, query.z].iter().any(|value| value.unsigned_abs() > MAX_BLOCK) {
+        return Err(bad_request("the position is outside the world"));
+    }
+    let map = Map::open(&state, &server).await?;
+    let layout = map.layout(false).await?;
+    let (_, dimension) = layout.dimension(&query.world, &query.dimension)?;
+    // within the world border, region coordinates fit an i32
+    let (region_x, region_z) = (query.x.div_euclid(512) as i32, query.z.div_euclid(512) as i32);
+    let (_, path) = region_file(&map, &dimension.folder, region_x, region_z).await?;
+    let ceiling = dimension.ceiling.then_some(map.settings.nether_ceiling);
+    let data = map
+        .read(&path, map.region_limit())
+        .await?
+        .ok_or_else(|| not_found("region not found"))?;
+    let (local_x, local_z) = (query.x.rem_euclid(512) as usize, query.z.rem_euclid(512) as usize);
+    let info = tokio::task::spawn_blocking(move || surface::inspect(&data, local_x, local_z, ceiling))
+        .await
+        .map_err(|_| ApiResponse::error("reading the region failed"))?
+        .map_err(|err| {
+            ApiResponse::error(format!("the region file could not be read: {err}"))
+                .with_status(StatusCode::UNPROCESSABLE_ENTITY)
+        })?
+        .ok_or_else(|| not_found("nothing here: the chunk was never generated or cannot be read"))?;
+    ApiResponse::new_serialized(json!({
+        "x": query.x,
+        "y": info.y,
+        "z": query.z,
+        "block": info.block,
+        "biome": info.biome,
+        "water_depth": info.water_depth,
+        "floor_block": info.floor_block,
+    }))
+    .ok()
 }
 
 /// Who is online, as far as the server says without its console.
@@ -640,6 +735,8 @@ pub fn router(state: &State) -> OpenApiRouter<State> {
         .route("/", get(overview))
         .route("/regions", get(regions))
         .route("/tile", get(tile))
+        .route("/surface", get(surface_tile))
+        .route("/block", get(block_info))
         .route("/players", get(player_list))
         .route("/online", get(online_players))
         .route("/entities", get(entity_list))

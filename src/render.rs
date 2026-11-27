@@ -55,16 +55,23 @@ fn column_colour(surface: &chunk::Surface, column: &chunk::Column) -> Rgb {
     scale(shown, (1.1 - depth * 0.025).clamp(0.65, 1.1))
 }
 
-/// Renders the chunks of a region file. `ceiling` is the Nether's scan start (see
-/// [`chunk::surface`]).
-pub fn region(data: &[u8], ceiling: Option<i32>) -> Result<Image, String> {
-    let slots = anvil::slots(data)?;
-    let mut colours = vec![[0u8; 3]; SIZE * SIZE];
-    let mut heights = vec![EMPTY; SIZE * SIZE];
-    let mut wet = vec![false; SIZE * SIZE];
-    let mut stats = Stats::default();
+/// The index of column `column` (`z * 16 + x`) of the chunk in slot `slot` within the
+/// region's `SIZE * SIZE` grid, row by row from north to south.
+pub fn pixel(slot: usize, column: usize) -> usize {
+    let (cx, cz) = (slot % 32, slot / 32);
+    (cz * 16 + column / 16) * SIZE + cx * 16 + column % 16
+}
 
-    for slot in slots {
+/// Reads the surface of every chunk of a region file and hands each one to `visit` with its
+/// slot index; chunks that cannot be shown (missing, unfinished, too old, unreadable or
+/// external) are only counted. Shared by the 2D tiles and the 3D surfaces.
+pub fn surfaces(
+    data: &[u8],
+    ceiling: Option<i32>,
+    mut visit: impl FnMut(usize, &chunk::Surface),
+) -> Result<Stats, String> {
+    let mut stats = Stats::default();
+    for slot in anvil::slots(data)? {
         let root = match anvil::chunk(data, slot) {
             Ok(Some(root)) => root,
             Ok(None) => {
@@ -76,31 +83,34 @@ pub fn region(data: &[u8], ceiling: Option<i32>) -> Result<Image, String> {
                 continue;
             }
         };
-        let surface = match chunk::surface(&root, ceiling) {
-            Ok(Parsed::Surface(surface)) => surface,
-            Ok(Parsed::Unfinished) => {
-                stats.unfinished += 1;
-                continue;
+        match chunk::surface(&root, ceiling) {
+            Ok(Parsed::Surface(surface)) => {
+                stats.rendered += 1;
+                visit(slot.index, &surface);
             }
-            Ok(Parsed::Unsupported) => {
-                stats.unsupported += 1;
-                continue;
-            }
-            Err(_) => {
-                stats.failed += 1;
-                continue;
-            }
-        };
-        stats.rendered += 1;
-        let (cx, cz) = (slot.index % 32, slot.index / 32);
+            Ok(Parsed::Unfinished) => stats.unfinished += 1,
+            Ok(Parsed::Unsupported) => stats.unsupported += 1,
+            Err(_) => stats.failed += 1,
+        }
+    }
+    Ok(stats)
+}
+
+/// Renders the chunks of a region file. `ceiling` is the Nether's scan start (see
+/// [`chunk::surface`]).
+pub fn region(data: &[u8], ceiling: Option<i32>) -> Result<Image, String> {
+    let mut colours = vec![[0u8; 3]; SIZE * SIZE];
+    let mut heights = vec![EMPTY; SIZE * SIZE];
+    let mut wet = vec![false; SIZE * SIZE];
+    let stats = surfaces(data, ceiling, |slot, surface| {
         for (i, column) in surface.columns.iter().enumerate() {
             let Some(column) = column else { continue };
-            let pixel = (cz * 16 + i / 16) * SIZE + cx * 16 + i % 16;
-            colours[pixel] = column_colour(&surface, column);
+            let pixel = pixel(slot, i);
+            colours[pixel] = column_colour(surface, column);
             heights[pixel] = column.y;
             wet[pixel] = column.depth > 0;
         }
-    }
+    })?;
 
     let mut rgba = vec![0u8; SIZE * SIZE * 4];
     for pixel in 0..SIZE * SIZE {
@@ -128,10 +138,15 @@ pub fn region(data: &[u8], ceiling: Option<i32>) -> Result<Image, String> {
     Ok(Image { rgba, stats })
 }
 
-/// The height a player can stand at on the block column `(x, z)` (block coordinates within
-/// the region, 0 to 511): one above its topmost visible block. `None` when the chunk is not
-/// there or not finished.
-pub fn standing_height(data: &[u8], x: usize, z: usize, ceiling: Option<i32>) -> Result<Option<i32>, String> {
+/// The block column `(x, z)` (block coordinates within the region, 0 to 511) with the
+/// surface of its chunk, reading only that chunk. `None` when the chunk is not there (or
+/// external), not finished or too old, or the column has no visible block.
+pub fn column(
+    data: &[u8],
+    x: usize,
+    z: usize,
+    ceiling: Option<i32>,
+) -> Result<Option<(chunk::Surface, chunk::Column)>, String> {
     let index = (z / 16) * 32 + x / 16;
     let Some(slot) = anvil::slots(data)?.into_iter().find(|slot| slot.index == index) else {
         return Ok(None);
@@ -140,9 +155,19 @@ pub fn standing_height(data: &[u8], x: usize, z: usize, ceiling: Option<i32>) ->
         return Ok(None);
     };
     Ok(match chunk::surface(&root, ceiling)? {
-        Parsed::Surface(surface) => surface.columns[(z % 16) * 16 + x % 16].map(|column| column.y + 1),
+        Parsed::Surface(surface) => {
+            let column = surface.columns[(z % 16) * 16 + x % 16];
+            column.map(|column| (surface, column))
+        }
         Parsed::Unfinished | Parsed::Unsupported => None,
     })
+}
+
+/// The height a player can stand at on the block column `(x, z)` (block coordinates within
+/// the region, 0 to 511): one above its topmost visible block. `None` when the chunk is not
+/// there or not finished.
+pub fn standing_height(data: &[u8], x: usize, z: usize, ceiling: Option<i32>) -> Result<Option<i32>, String> {
+    Ok(column(data, x, z, ceiling)?.map(|(_, column)| column.y + 1))
 }
 
 /// A PNG of RGBA pixels.

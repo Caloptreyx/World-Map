@@ -59,11 +59,13 @@ async fn prune(state: &State, settings: &Settings) -> Result<(), anyhow::Error> 
     let keep_from = Utc::now().date_naive()
         - chrono::Days::new(u64::from(settings.heatmap_retention_days.max(1)));
     let samples = db::prune_heat(&state.database, keep_from).await?;
-    let tiles = db::prune_tiles(&state.database, i64::from(settings.tile_cache_mb) << 20).await?;
+    // 2D tiles and 3D surfaces share the tile cache budget
+    let (tiles, surfaces) =
+        db::prune_cache(&state.database, i64::from(settings.tile_cache_mb) << 20).await?;
     let overlays = db::prune_overlays(&state.database, db::OVERLAY_CACHE_BYTES).await?;
-    if samples > 0 || tiles > 0 || overlays > 0 {
+    if samples > 0 || tiles > 0 || surfaces > 0 || overlays > 0 {
         tracing::info!(
-            "world map: pruned {samples} old heatmap rows, {tiles} cached tiles and {overlays} cached overlays"
+            "world map: pruned {samples} old heatmap rows, {tiles} cached tiles, {surfaces} cached 3D surfaces and {overlays} cached overlays"
         );
     }
     // old chunk tool backups and import staging folders, through each server's Wings

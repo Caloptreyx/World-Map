@@ -1,5 +1,5 @@
-//! The extension's tables: rendered tiles, servers whose map was opened (with their per-server
-//! settings), heatmap samples, chunk tool operations and cached overlay values.
+//! The extension's tables: rendered tiles and 3D surfaces, servers whose map was opened (with
+//! their per-server settings), heatmap samples, chunk tool operations and cached overlay values.
 use crate::players::Visibility;
 use chrono::{DateTime, NaiveDate, Utc};
 use shared::database::Database;
@@ -66,22 +66,101 @@ pub async fn store_tile(
     Ok(())
 }
 
-/// Deletes the least recently viewed tiles beyond `budget` bytes of images.
-pub async fn prune_tiles(db: &Database, budget: i64) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(
-        "DELETE FROM dev_caloptreyx_worldmap_tiles AS tiles USING (
-             SELECT server_uuid, path FROM (
-                 SELECT server_uuid, path,
-                     SUM(octet_length(image)) OVER (ORDER BY used DESC, server_uuid, path) AS total
-                 FROM dev_caloptreyx_worldmap_tiles
-             ) AS ranked WHERE total > $1
-         ) AS old
-         WHERE tiles.server_uuid = old.server_uuid AND tiles.path = old.path",
+/// A cached 3D surface of a region file (zlib-compressed, see `surface`).
+pub struct Surface {
+    pub modified: i64,
+    pub size: i64,
+    pub variant: String,
+    pub data: Vec<u8>,
+}
+
+pub async fn surface(db: &Database, server: Uuid, path: &str) -> Result<Option<Surface>, sqlx::Error> {
+    let row: Option<(i64, i64, String, Vec<u8>)> = sqlx::query_as(
+        "SELECT modified, size, variant, data FROM dev_caloptreyx_worldmap_surfaces
+         WHERE server_uuid = $1 AND path = $2",
     )
-    .bind(budget)
+    .bind(server)
+    .bind(path)
+    .fetch_optional(db.read())
+    .await?;
+    Ok(row.map(|(modified, size, variant, data)| Surface {
+        modified,
+        size,
+        variant,
+        data,
+    }))
+}
+
+/// Marks a surface as viewed (at most once an hour), for the cache's least-recently-used pruning.
+pub async fn touch_surface(db: &Database, server: Uuid, path: &str) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE dev_caloptreyx_worldmap_surfaces SET used = now()
+         WHERE server_uuid = $1 AND path = $2 AND used < now() - INTERVAL '1 hour'",
+    )
+    .bind(server)
+    .bind(path)
     .execute(db.write())
     .await?;
-    Ok(result.rows_affected())
+    Ok(())
+}
+
+pub async fn store_surface(
+    db: &Database,
+    server: Uuid,
+    path: &str,
+    surface: &Surface,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO dev_caloptreyx_worldmap_surfaces (server_uuid, path, modified, size, variant, data)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (server_uuid, path) DO UPDATE SET
+             modified = EXCLUDED.modified, size = EXCLUDED.size, variant = EXCLUDED.variant,
+             data = EXCLUDED.data, used = now()",
+    )
+    .bind(server)
+    .bind(path)
+    .bind(surface.modified)
+    .bind(surface.size)
+    .bind(&surface.variant)
+    .bind(&surface.data)
+    .execute(db.write())
+    .await?;
+    Ok(())
+}
+
+/// Deletes the least recently viewed tiles and 3D surfaces beyond `budget` bytes of both
+/// together (one least-recently-used order over the two tables); returns how many tiles and
+/// how many surfaces went.
+pub async fn prune_cache(db: &Database, budget: i64) -> Result<(u64, u64), sqlx::Error> {
+    let (tiles, surfaces): (i64, i64) = sqlx::query_as(
+        "WITH ranked AS (
+             SELECT kind, server_uuid, path,
+                 SUM(bytes) OVER (ORDER BY used DESC, kind, server_uuid, path) AS total
+             FROM (
+                 SELECT 'tile' AS kind, server_uuid, path, used, octet_length(image) AS bytes
+                 FROM dev_caloptreyx_worldmap_tiles
+                 UNION ALL
+                 SELECT 'surface', server_uuid, path, used, octet_length(data)
+                 FROM dev_caloptreyx_worldmap_surfaces
+             ) AS cached
+         ), old AS (
+             SELECT kind, server_uuid, path FROM ranked WHERE total > $1
+         ), deleted_tiles AS (
+             DELETE FROM dev_caloptreyx_worldmap_tiles AS tiles USING old
+             WHERE old.kind = 'tile' AND tiles.server_uuid = old.server_uuid AND tiles.path = old.path
+             RETURNING 1
+         ), deleted_surfaces AS (
+             DELETE FROM dev_caloptreyx_worldmap_surfaces AS surfaces USING old
+             WHERE old.kind = 'surface' AND surfaces.server_uuid = old.server_uuid
+                 AND surfaces.path = old.path
+             RETURNING 1
+         )
+         SELECT (SELECT COUNT(*) FROM deleted_tiles), (SELECT COUNT(*) FROM deleted_surfaces)",
+    )
+    .bind(budget)
+    .fetch_one(db.write())
+    .await?;
+    Ok((tiles as u64, surfaces as u64))
 }
 
 /// Remembers that the server's map was opened, so its heatmap is sampled.
